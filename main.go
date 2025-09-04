@@ -13,8 +13,9 @@ import (
 func main() {
 	pfsenseApiKey := os.Getenv("PFSENSE_API_KEY")
 	botToken := os.Getenv("TG_BOT_TOKEN")
+	tlsKey := os.Getenv("TLS_CRYPT_KEY")
 
-	pfsenseClient := pfsense.New(pfsenseApiKey)
+	pfsenseClient := pfsense.New(pfsenseApiKey, []byte(tlsKey))
 	bot, err := tgbotapi.NewBotAPI(botToken)
 
 	if err != nil {

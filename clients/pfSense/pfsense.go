@@ -16,7 +16,8 @@ import (
 )
 
 type PfSenseClient struct {
-	apiKey string
+	apiKey      string
+	tlsCryptKey []byte
 }
 
 type CertificateRequest struct {
@@ -30,8 +31,10 @@ type CertificateRequest struct {
 	} `json:"certificate"`
 }
 
-func New(apiKey string) *PfSenseClient {
-	return &PfSenseClient{apiKey: apiKey}
+func New(apiKey string, tlsCryptKey []byte) *PfSenseClient {
+	return &PfSenseClient{
+		apiKey:      apiKey,
+		tlsCryptKey: tlsCryptKey}
 }
 
 func (c *PfSenseClient) CreateUser(username, password, fullName, email string, disabled bool) (string, error) {
@@ -500,27 +503,7 @@ func (c *PfSenseClient) GenerateOVPN(certRef, passphrase, server string) ([]byte
 	keyPEM = ensureNL(keyPEM)
 
 	// 4) TLS-Crypt ключ (байты) — ДОЛЖЕН совпадать с серверным ключом!
-	tlsCrypt := ensureNL([]byte(`# 
-# 2048 bit OpenVPN static key
-#
------BEGIN OpenVPN Static key V1-----
-c919a4c433763d30341eb30f9922a640
-eb86233d877cff37f87fbe14b9056fbc
-476bf366387c23b94d9022375fcdcac7
-e91347d0997612ee958fdf61826abdb8
-dd96f171ba0be8e6e5657d461c9a59b9
-153b23d99abf40a245e2e16ea79cbbcb
-eeecd8dfd032cb56e4c020fa933d5193
-b7f2cf9ac9fdc21f0deef45856d4df34
-617145705d07fdb69b08de1a8cf3fa7f
-7c00d257a5b30f1b7df0af6e399868d8
-0a5bf5757f772c8315ed98da0abcd77a
-7de142991fc7f68d8a39e367216d1e7e
-7b866d6ac11a71228324875ffbb3e76b
-1fc6d8e78a5acf655644533b7d3c97d6
-ba07ecf5733c3349a88aa8a1be49cde2
-0e24ba2abced5ad4692413297b933133
------END OpenVPN Static key V1-----`))
+	tlsCrypt := ensureNL(c.tlsCryptKey)
 
 	var buf bytes.Buffer
 
