@@ -10,6 +10,7 @@
 *.ovpn
 *certificates
 *.bat
+*.p12
 # Test binary, built with `go test -c`
 *.test
 
