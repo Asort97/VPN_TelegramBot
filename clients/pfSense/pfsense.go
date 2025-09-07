@@ -2,6 +2,7 @@ package pfsense
 
 import (
 	"bytes"
+	"crypto/x509"
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
@@ -11,6 +12,7 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"time"
 
 	colorfulprint "github.com/Asort97/vpnBot/clients/colorfulPrint"
 )
@@ -30,6 +32,12 @@ type CertificateRequest struct {
 		Lifetime  int    `json:"lifetime"`
 	} `json:"certificate"`
 }
+type Certificate struct {
+	ID    int    `json:"id"`
+	RefID string `json:"refid"`
+	Descr string `json:"descr"`
+	Crt   string `json:"crt"`
+}
 
 func New(apiKey string, tlsCryptKey []byte) *PfSenseClient {
 	return &PfSenseClient{
@@ -37,10 +45,54 @@ func New(apiKey string, tlsCryptKey []byte) *PfSenseClient {
 		tlsCryptKey: tlsCryptKey}
 }
 
+func (c *PfSenseClient) IsUserExist(userName string) (string, bool) {
+
+	reqU, err := http.NewRequest("GET", "https://drake2.eunet.lv/api/v2/users?limit=0&offset=0", nil)
+	if err != nil {
+		return "", false
+	}
+	reqU.Header.Set("X-API-Key", c.apiKey)
+
+	respU, err := (&http.Client{}).Do(reqU)
+	if err != nil {
+		return "", false
+	}
+	defer respU.Body.Close()
+
+	b, _ := io.ReadAll(respU.Body)
+
+	if respU.StatusCode >= 400 {
+		colorfulprint.PrintError(fmt.Sprintf("users failed: %s %s\n", respU.Status, string(b)), err)
+		return "", false
+	}
+
+	fmt.Printf("%s\n", b)
+
+	var users struct {
+		Data []struct {
+			ID   int    `json:"id"`
+			Name string `json:"name"`
+		} `json:"data"`
+	}
+
+	if err := json.Unmarshal(b, &users); err != nil {
+		return "", false
+	}
+
+	fmt.Printf("Users body %s\n", users)
+
+	for _, u := range users.Data {
+		if u.Name == userName {
+			colorfulprint.PrintState(fmt.Sprintf("User with name{%s} exist!!!", u.Name))
+			return strconv.Itoa(u.ID), true
+		}
+	}
+
+	return "", false
+}
+
 func (c *PfSenseClient) CreateUser(username, password, fullName, email string, disabled bool) (string, error) {
 	url := "https://drake2.eunet.lv/api/v2/user"
-
-	// fmt.Println("Creating user in pfSense...")
 
 	colorfulprint.PrintState("Creating user in pfSense...")
 
@@ -72,7 +124,8 @@ func (c *PfSenseClient) CreateUser(username, password, fullName, email string, d
 	defer resp.Body.Close()
 
 	body, _ := io.ReadAll(resp.Body)
-	fmt.Printf("Status: %s\n", resp.Status)
+
+	colorfulprint.PrintState(fmt.Sprintf("Creating user ended with status: %s\n", resp.Status))
 	fmt.Printf("Response: %s\n", string(body))
 
 	var result struct {
@@ -103,8 +156,9 @@ func (c *PfSenseClient) CreateCertificate(descr, caref, keytype string, keylen i
 	payload := map[string]interface{}{
 		"descr":         descr,
 		"caref":         caref,
-		"keytype":       keytype,      // "RSA" или "ECDSA"
-		"digest_alg":    digestAlg,    // например, "sha256"
+		"keytype":       keytype,   // "RSA" или "ECDSA"
+		"digest_alg":    digestAlg, // например, "sha256"
+		"lifetime":      30,
 		"dn_commonname": dnCommonName, // имя пользователя или сертификата
 	}
 
@@ -136,7 +190,7 @@ func (c *PfSenseClient) CreateCertificate(descr, caref, keytype string, keylen i
 	defer resp.Body.Close()
 
 	body, _ := io.ReadAll(resp.Body)
-	fmt.Printf("Status: %s\n", resp.Status)
+	colorfulprint.PrintState(fmt.Sprintf("Creating certificate for user{%s} ended with status: %s\n", dnCommonName, resp.Status))
 	// fmt.Printf("Response: %s\n", string(body))
 
 	if resp.StatusCode >= 400 {
@@ -207,7 +261,7 @@ func (c *PfSenseClient) GetCARef() (string, error) {
 }
 
 func (c *PfSenseClient) AttachCertificateToUser(userId, certId string) error {
-	fmt.Printf("Attaching Cert%s to user %s...\n", certId, userId)
+	fmt.Printf("Attaching Certificate{%s} to user{%s}...\n", certId, userId)
 
 	url := "https://drake2.eunet.lv/api/v2/user"
 	payload := map[string]interface{}{
@@ -217,12 +271,12 @@ func (c *PfSenseClient) AttachCertificateToUser(userId, certId string) error {
 
 	jsonBody, err := json.Marshal(payload)
 	if err != nil {
-		return fmt.Errorf("couldnt marshal payload %w", err)
+		return colorfulprint.PrintError(fmt.Sprintf("couldnt marshal payload %w", err), err)
 	}
 
 	req, err := http.NewRequest("PATCH", url, bytes.NewBuffer(jsonBody))
 	if err != nil {
-		return fmt.Errorf("couldnt create request %w", err)
+		return colorfulprint.PrintError(fmt.Sprintf("couldnt create request %w", err), err)
 	}
 
 	req.Header.Set("X-API-Key", c.apiKey)
@@ -237,7 +291,7 @@ func (c *PfSenseClient) AttachCertificateToUser(userId, certId string) error {
 	defer resp.Body.Close()
 
 	body, _ := io.ReadAll(resp.Body)
-	fmt.Printf("Status: %s\n", resp.Status)
+	colorfulprint.PrintState(fmt.Sprintf("Attaching certificate{%s} to user{%s} ended with status: %s\n", certId, userId, resp.Status))
 	// fmt.Printf("Response: %s\n", string(body))
 
 	if resp.StatusCode >= 400 {
@@ -307,10 +361,10 @@ func (c *PfSenseClient) ExportCertificateP12(certRef, passphrase string) ([]byte
 
 }
 
-func (c *PfSenseClient) FindCertificate(refid string) {
-	colorfulprint.PrintState(fmt.Sprintf("Looking for certificate: %s", refid))
+func (c *PfSenseClient) GetDateOfCertificate(id string) (string, string, bool, error) {
+	colorfulprint.PrintState(fmt.Sprintf("Looking for certificate: %s", id))
 
-	url := fmt.Sprintf("https://drake2.eunet.lv/api/v2/system/certificate?id=%s", refid)
+	url := fmt.Sprintf("https://drake2.eunet.lv/api/v2/system/certificate?id=%s", id)
 
 	var CertDetail struct {
 		Data struct {
@@ -322,34 +376,51 @@ func (c *PfSenseClient) FindCertificate(refid string) {
 
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
-		colorfulprint.PrintError("error to make request: %w", err)
+		return "nil", "", false, fmt.Errorf("error to make request: %w", err)
 	}
 	req.Header.Set("X-API-Key", c.apiKey)
 
 	client := &http.Client{}
-
 	resp, err := client.Do(req)
 	if err != nil {
-		colorfulprint.PrintError("error to get response: %w", err)
+		return "nil", "", false, fmt.Errorf("error to get response: %w", err)
 	}
 	defer resp.Body.Close()
+
 	if resp.StatusCode >= 400 {
 		body, _ := io.ReadAll(resp.Body)
-		colorfulprint.PrintError(fmt.Sprintf("failed with status %s: %s", resp.Status, string(body)), nil)
+		return "nil", "", false, fmt.Errorf("failed with status %s: %s", resp.Status, string(body))
 	}
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		colorfulprint.PrintError("error reading response: %w", err)
+		return "nil", "", false, fmt.Errorf("error reading response: %w", err)
 	}
 
 	err = json.Unmarshal(body, &CertDetail)
 	if err != nil {
-		colorfulprint.PrintError("error unmarshal json: %w", err)
+		return "nil", "", false, fmt.Errorf("error unmarshal json: %w", err)
 	}
 
-	fmt.Printf("Response status %s\n", string(body))
-	fmt.Printf("Private key: %s\n", CertDetail.Data.Prv)
+	// --- тут начинается проверка сертификата ---
+	block, _ := pem.Decode([]byte(CertDetail.Data.Crt))
+	if block == nil {
+		return "nil", "", false, fmt.Errorf("failed to decode PEM")
+	}
+
+	cert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		return "nil", "", false, fmt.Errorf("failed to parse certificate: %w", err)
+	}
+
+	fmt.Printf("Certificate valid from: %s\n", cert.NotBefore)
+	fmt.Printf("Certificate valid until: %s\n", cert.NotAfter)
+	fmt.Printf("Expired: %v\n", time.Now().After(cert.NotAfter))
+
+	certDateFrom := cert.NotBefore.Format("02.01.2006 15:04")
+	certDateUntil := cert.NotAfter.Format("02.01.2006 15:04")
+
+	return certDateFrom, certDateUntil, time.Now().After(cert.NotAfter), nil
 }
 
 func ParseP12WithOpenSSL(p12Data []byte, passphrase string) (certPEM, keyPEM, caPEM []byte, err error) {
@@ -424,55 +495,6 @@ func ParsePEMChain(pemData []byte) (certPEM, keyPEM, caPEM []byte, err error) {
 	return certPEM, keyPEM, caPEM, nil
 }
 
-// func ParseP12(data []byte, passphrase string) (certPEM, keyPEM, caPEM []byte, err error) {
-// 	blocks, err := pkcs12.ToPEM(data, passphrase)
-// 	if err != nil {
-// 		return nil, nil, nil, fmt.Errorf("failed to decode p12: %w", err)
-// 	}
-
-// 	var keyBlock, clientCertBlock *pem.Block
-// 	var caBlocks []*pem.Block
-
-// 	// Проходим по всем PEM-блокам и сортируем их
-// 	for _, block := range blocks {
-// 		switch {
-// 		case strings.Contains(block.Type, "PRIVATE KEY"):
-// 			// Нашли приватный ключ
-// 			keyBlock = block
-// 		case strings.Contains(block.Type, "CERTIFICATE"):
-// 			// Это сертификат. Нужно определить, клиентский он или CA.
-// 			// Простейшая эвристика: клиентский сертификат обычно имеет CommonName = username.
-// 			// Более надежный способ - посмотреть в поле Subject.
-// 			// Для начала просто будем считать первый сертификат - клиентским, остальные - CA.
-// 			if clientCertBlock == nil {
-// 				clientCertBlock = block
-// 			} else {
-// 				caBlocks = append(caBlocks, block)
-// 			}
-// 		}
-// 	}
-
-// 	// Преобразуем блоки в байты
-// 	if keyBlock != nil {
-// 		keyPEM = pem.EncodeToMemory(keyBlock)
-// 	}
-// 	if clientCertBlock != nil {
-// 		certPEM = pem.EncodeToMemory(clientCertBlock)
-// 	}
-// 	for _, block := range caBlocks {
-// 		caPEM = append(caPEM, pem.EncodeToMemory(block)...)
-// 	}
-
-// 	// Проверяем, что нашли самое необходимое
-// 	if certPEM == nil || keyPEM == nil {
-// 		return nil, nil, nil, fmt.Errorf("p12 does not contain client cert or key")
-// 	}
-// 	// CA может и не быть в P12, если система доверяет ему иначе, но у нас он обычно есть.
-
-//		return certPEM, keyPEM, caPEM, nil
-//	}
-//
-// ensureNL: trim и гарантируем перевод строки в конце
 func ensureNL(b []byte) []byte {
 	b = bytes.TrimSpace(b)
 	if len(b) == 0 || b[len(b)-1] != '\n' {
@@ -564,6 +586,111 @@ func (c *PfSenseClient) DeleteUserCertificate(certificateId string) error {
 		return colorfulprint.PrintError("error sending request: %w", err)
 	}
 	defer resp.Body.Close()
-
+	colorfulprint.PrintState(fmt.Sprintf("Successfully deleted certificate with id:%s", certificateId))
 	return nil
+}
+
+func (c *PfSenseClient) GetAttachedCertRefIDByUserName(userName string) (string, string, error) {
+	// 1) Получаем всех users и ищем по name
+	reqU, err := http.NewRequest("GET", "https://drake2.eunet.lv/api/v2/users?limit=0&offset=0", nil)
+	if err != nil {
+		return "", "", err
+	}
+	reqU.Header.Set("X-API-Key", c.apiKey)
+
+	respU, err := (&http.Client{}).Do(reqU)
+	if err != nil {
+		return "", "", err
+	}
+	defer respU.Body.Close()
+
+	b, _ := io.ReadAll(respU.Body)
+
+	if respU.StatusCode >= 400 {
+		return "", "", colorfulprint.PrintError(fmt.Sprintf("users failed: %s %s\n", respU.Status, string(b)), err)
+	}
+
+	fmt.Printf("%s\n", b)
+
+	var users struct {
+		Data []struct {
+			ID   int      `json:"id"`
+			Name string   `json:"name"`
+			Cert []string `json:"cert"` // refid сертификатов
+		} `json:"data"`
+	}
+
+	if err := json.Unmarshal(b, &users); err != nil {
+		return "", "", err
+	}
+
+	fmt.Printf("Users body %s\n", users)
+
+	var certRefs []string
+	var userId int
+
+	for _, u := range users.Data {
+		if u.Name == userName {
+			certRefs = u.Cert
+			userId = u.ID
+			colorfulprint.PrintState(fmt.Sprintf("Found our user %s", u.Name))
+			break
+		}
+	}
+
+	if len(certRefs) == 0 {
+		return strconv.Itoa(userId), "", colorfulprint.PrintError(fmt.Sprintf("User{%s} doesn`t have attached certificates!!", userName), err)
+	}
+
+	colorfulprint.PrintState(fmt.Sprintf("Certificate refid: %s", certRefs[0]))
+
+	return strconv.Itoa(userId), certRefs[0], nil
+}
+
+func (c *PfSenseClient) GetCertificateIDByRefid(refID string) (string, error) {
+	// 1) Получаем всех users и ищем по name
+	reqU, err := http.NewRequest("GET", "https://drake2.eunet.lv/api/v2/system/certificates?limit=0&offset=0", nil)
+	if err != nil {
+		return "", err
+	}
+	reqU.Header.Set("X-API-Key", c.apiKey)
+
+	respU, err := (&http.Client{}).Do(reqU)
+	if err != nil {
+		return "", err
+	}
+	defer respU.Body.Close()
+
+	b, _ := io.ReadAll(respU.Body)
+
+	if respU.StatusCode >= 400 {
+		return "", colorfulprint.PrintError(fmt.Sprintf("users failed: %s %s\n", respU.Status, string(b)), err)
+	}
+
+	var certificates struct {
+		Data []struct {
+			ID    int    `json:"id"`
+			RefID string `json:"refid"` // refid сертификатов
+		} `json:"data"`
+	}
+
+	if err := json.Unmarshal(b, &certificates); err != nil {
+		return "", err
+	}
+
+	fmt.Printf("Users body %+v\n", certificates)
+
+	var certID int
+
+	for _, u := range certificates.Data {
+		fmt.Printf("USER IN MASSIVE{%s} -> we trying to find %s \n", u.RefID, refID)
+		if u.RefID == refID {
+			certID = u.ID
+			colorfulprint.PrintState(fmt.Sprintf("Found our cert id %d", certID))
+			return strconv.Itoa(u.ID), nil
+		}
+	}
+
+	colorfulprint.PrintState(fmt.Sprintf("Certificate ID: %d", certID))
+	return "", fmt.Errorf("no cert IDs resolved for user")
 }
