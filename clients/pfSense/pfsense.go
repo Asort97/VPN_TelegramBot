@@ -624,8 +624,6 @@ func (c *PfSenseClient) GetAttachedCertRefIDByUserName(userName string) (string,
 		return "", "", err
 	}
 
-	fmt.Printf("Users body %s\n", users)
-
 	var certRefs []string
 	var userId int
 
