@@ -5,11 +5,28 @@ import (
 	"log"
 	"os"
 	"strconv"
+	"time"
 
 	colorfulprint "github.com/Asort97/vpnBot/clients/colorfulPrint"
 	pfsense "github.com/Asort97/vpnBot/clients/pfSense"
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 )
+
+var lastActionKey = make(map[int64]map[string]time.Time)
+
+func canProceedKey(userID int64, key string, interval time.Duration) bool {
+	now := time.Now()
+	if lastActionKey[userID] == nil {
+		lastActionKey[userID] = make(map[string]time.Time)
+	}
+	if t, ok := lastActionKey[userID][key]; ok {
+		if now.Sub(t) < interval {
+			return false
+		}
+	}
+	lastActionKey[userID][key] = now
+	return true
+}
 
 func main() {
 	pfsenseApiKey := os.Getenv("PFSENSE_API_KEY")
@@ -57,6 +74,11 @@ func main() {
 			// case "Удалить":
 			// 	pfsenseClient.DeleteUserCertificate("4")
 			case "Получить VPN":
+				if !canProceedKey(update.Message.From.ID, "get_vpn", 5*time.Second) {
+					bot.Send(tgbotapi.NewMessage(update.Message.Chat.ID, "⏳ Подождите ~5 сек перед повторной выдачей VPN"))
+					break
+				}
+
 				telegramUserid := fmt.Sprint(update.Message.From.ID)
 				_, isExist := pfsenseClient.IsUserExist(telegramUserid)
 
@@ -107,25 +129,34 @@ func main() {
 				// instructionWindows(update, bot)
 
 			case "Проверить статус":
+				if !canProceedKey(update.Message.From.ID, "check_status", 3*time.Second) {
+					bot.Send(tgbotapi.NewMessage(update.Message.Chat.ID, "⏳ Чуть позже, подождите пару секунд"))
+					break
+				}
 				checkStatus(pfsenseClient, update, bot)
 			}
 		}
 
-		if update.CallbackQuery != nil {
-			data := update.CallbackQuery.Data
-			switch data {
-			case "windows":
-				instructionWindows(update, bot)
-				// логика выдачи VPN
-			case "android":
-				instructionAndroid(update, bot)
-				// логика проверки
-			case "ios":
-				instructionIos(update, bot)
+		if cq := update.CallbackQuery; cq != nil && cq.Message != nil {
 
+			chatID := cq.Message.Chat.ID
+			userID := cq.From.ID
+
+			if !canProceedKey(userID, "instructions", 5*time.Second) {
+				bot.Send(tgbotapi.NewMessage(chatID, "⏳ Подождите немного перед повторным запросом инструкции"))
+				bot.Request(tgbotapi.NewCallback(cq.ID, "")) // ответить, чтобы часы не висели
+				continue
 			}
-			// не забудь ответить на callback, чтобы кнопка "не висела"
-			bot.Request(tgbotapi.NewCallback(update.CallbackQuery.ID, "✅"))
+
+			switch cq.Data {
+			case "windows":
+				instructionWindows(chatID, bot)
+			case "android":
+				instructionAndroid(chatID, bot)
+			case "ios":
+				instructionIos(chatID, bot)
+			}
+			bot.Request(tgbotapi.NewCallback(cq.ID, "✅"))
 		}
 	}
 }
@@ -160,57 +191,53 @@ func checkStatus(pfsenseClient *pfsense.PfSenseClient, update tgbotapi.Update, b
 	bot.Send(msg)
 }
 
-func instructionWindows(update tgbotapi.Update, bot *tgbotapi.BotAPI) {
-	photo1 := tgbotapi.NewPhoto(update.Message.Chat.ID, tgbotapi.FilePath("InstructionPhotos/Windows/1.png"))
+func instructionWindows(chatID int64, bot *tgbotapi.BotAPI) {
+	photo1 := tgbotapi.NewPhoto(chatID, tgbotapi.FilePath("InstructionPhotos/Windows/1.png"))
 	photo1.Caption = "1) Скачайте <a href=\"https://openvpn.net/community/\">OpenVPN</a> с официального сайта \n"
-	photo2 := tgbotapi.NewPhoto(update.Message.Chat.ID, tgbotapi.FilePath("InstructionPhotos/Windows/2.png"))
+	photo1.ParseMode = "HTML"
+
+	photo2 := tgbotapi.NewPhoto(chatID, tgbotapi.FilePath("InstructionPhotos/Windows/2.png"))
 	photo2.Caption = "2) После скачивания откройте трей в правом нижнем углу \n"
-	photo3 := tgbotapi.NewPhoto(update.Message.Chat.ID, tgbotapi.FilePath("InstructionPhotos/Windows/3.png"))
+
+	photo3 := tgbotapi.NewPhoto(chatID, tgbotapi.FilePath("InstructionPhotos/Windows/3.png"))
 	photo3.Caption = "3) Нажмите правой кнопкой мыши по значку OpenVPN и далее Импорт->Импорт файла конфигурации и выберите файл конфигурации который мы вам отправим\n"
-	photo4 := tgbotapi.NewPhoto(update.Message.Chat.ID, tgbotapi.FilePath("InstructionPhotos/Windows/4.png"))
+
+	photo4 := tgbotapi.NewPhoto(chatID, tgbotapi.FilePath("InstructionPhotos/Windows/4.png"))
 	photo4.Caption = "4) Далее нажмите правой кнопкой по значку снова и нажмите кнопку Подключиться\n"
-	photo1.ParseMode = "HTML"
+
 	bot.Send(photo1)
 	bot.Send(photo2)
 	bot.Send(photo3)
 	bot.Send(photo4)
 }
 
-func instructionAndroid(update tgbotapi.Update, bot *tgbotapi.BotAPI) {
-	chatID := update.CallbackQuery.Message.Chat.ID // вместо update.Message.Chat.ID
+func instructionAndroid(chatID int64, bot *tgbotapi.BotAPI) {
+	msg := tgbotapi.NewMessage(chatID, "1) Скачайте <a href=\"https://play.google.com/store/apps/details?id=net.openvpn.openvpn\">OpenVPN</a> с GooglePlay \n")
+	msg.ParseMode = "HTML"
+	bot.Send(msg)
 
-	photo1 := tgbotapi.NewMessage(chatID, "1) Скачайте <a href=\"https://play.google.com/store/apps/details?id=net.openvpn.openvpn\">OpenVPN</a> с GooglePlay \n")
-	photo2 := tgbotapi.NewPhoto(chatID, tgbotapi.FilePath("InstructionPhotos/Android/1.jpg"))
-	photo2.Caption = "2) После скачивания откройте файловых менеджер и найдите файл сертификата \n"
-	photo3 := tgbotapi.NewPhoto(chatID, tgbotapi.FilePath("InstructionPhotos/Android/2.jpg"))
-	photo3.Caption = "3) Нажмите на файл и выберите в меню OpenVPN\n"
-	photo4 := tgbotapi.NewPhoto(chatID, tgbotapi.FilePath("InstructionPhotos/Android/3.jpg"))
-	photo4.Caption = "4) Нажмите кнопку OK и подключитесь \n"
-	photo1.ParseMode = "HTML"
-	bot.Send(photo1)
-	bot.Send(photo2)
-	bot.Send(photo3)
-	bot.Send(photo4)
+	bot.Send(tgbotapi.NewPhoto(chatID, tgbotapi.FilePath("InstructionPhotos/Android/1.jpg")))
+	p2 := tgbotapi.NewPhoto(chatID, tgbotapi.FilePath("InstructionPhotos/Android/2.jpg"))
+	p2.Caption = "3) Нажмите на файл и выберите в меню OpenVPN"
+	bot.Send(p2)
+	p3 := tgbotapi.NewPhoto(chatID, tgbotapi.FilePath("InstructionPhotos/Android/3.jpg"))
+	p3.Caption = "4) Нажмите OK и подключитесь"
+	bot.Send(p3)
 }
 
-func instructionIos(update tgbotapi.Update, bot *tgbotapi.BotAPI) {
-	chatID := update.CallbackQuery.Message.Chat.ID // вместо update.Message.Chat.ID
+func instructionIos(chatID int64, bot *tgbotapi.BotAPI) {
+	msg := tgbotapi.NewMessage(chatID, "1) Скачайте <a href=\"https://apps.apple.com/au/app/openvpn-connect/id590379981\">OpenVPN</a> с AppStore \n")
+	msg.ParseMode = "HTML"
+	bot.Send(msg)
 
-	photo1 := tgbotapi.NewMessage(chatID, "1) Скачайте <a href=\"https://apps.apple.com/au/app/openvpn-connect/id590379981\">OpenVPN</a> с AppStore \n")
-	photo2 := tgbotapi.NewPhoto(chatID, tgbotapi.FilePath("InstructionPhotos/Ios/1.jpg"))
-	photo2.Caption = "2) После скачивания откройте файловый менеджер \n"
-	photo3 := tgbotapi.NewPhoto(chatID, tgbotapi.FilePath("InstructionPhotos/Ios/2.jpg"))
-	photo3.Caption = "3) Найдите файл сертификата который мы вам дали\n"
-	photo4 := tgbotapi.NewPhoto(chatID, tgbotapi.FilePath("InstructionPhotos/Ios/4.png"))
-	photo4.Caption = "4) Нажмите на него и откройте настройки пересылки и нажмите на OpenVPN\n"
-	photo5 := tgbotapi.NewPhoto(chatID, tgbotapi.FilePath("InstructionPhotos/Ios/5.jpg"))
-	photo5.Caption = "5) Нажмите кнопку ADD и подключитесь\n"
-	photo1.ParseMode = "HTML"
-	bot.Send(photo1)
-	bot.Send(photo2)
-	bot.Send(photo3)
-	bot.Send(photo4)
-	bot.Send(photo5)
+	bot.Send(tgbotapi.NewPhoto(chatID, tgbotapi.FilePath("InstructionPhotos/Ios/1.jpg")))
+	p2 := tgbotapi.NewPhoto(chatID, tgbotapi.FilePath("InstructionPhotos/Ios/2.jpg"))
+	p2.Caption = "3) Найдите файл сертификата"
+	bot.Send(p2)
+	p4 := tgbotapi.NewPhoto(chatID, tgbotapi.FilePath("InstructionPhotos/Ios/4.png"))
+	p4.Caption = "4) Откройте через OpenVPN"
+	bot.Send(p4)
+	bot.Send(tgbotapi.NewPhoto(chatID, tgbotapi.FilePath("InstructionPhotos/Ios/5.jpg")))
 }
 
 func menuKeyboard() tgbotapi.ReplyKeyboardMarkup {

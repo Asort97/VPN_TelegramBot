@@ -62,7 +62,7 @@ func (c *PfSenseClient) IsUserExist(userName string) (string, bool) {
 	b, _ := io.ReadAll(respU.Body)
 
 	if respU.StatusCode >= 400 {
-		colorfulprint.PrintError(fmt.Sprintf("users failed: %s %s\n", respU.Status, string(b)), err)
+		colorfulprint.PrintError(fmt.Sprintf("users failed: %s \n", respU.Status), err)
 		return "", false
 	}
 
@@ -78,8 +78,6 @@ func (c *PfSenseClient) IsUserExist(userName string) (string, bool) {
 	if err := json.Unmarshal(b, &users); err != nil {
 		return "", false
 	}
-
-	fmt.Printf("Users body %s\n", users)
 
 	for _, u := range users.Data {
 		if u.Name == userName {
@@ -126,7 +124,6 @@ func (c *PfSenseClient) CreateUser(username, password, fullName, email string, d
 	body, _ := io.ReadAll(resp.Body)
 
 	colorfulprint.PrintState(fmt.Sprintf("Creating user ended with status: %s\n", resp.Status))
-	fmt.Printf("Response: %s\n", string(body))
 
 	var result struct {
 		Data struct {
