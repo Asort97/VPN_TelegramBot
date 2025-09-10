@@ -5,6 +5,7 @@ import (
 	"log"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	colorfulprint "github.com/Asort97/vpnBot/clients/colorfulPrint"
@@ -12,7 +13,36 @@ import (
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 )
 
+type InstructionState struct {
+	CurrentStep int
+	MessageID   int
+	ChatID      int64
+}
+
+var instructionMessage tgbotapi.Message
+
+// var instructionStates = make(map[int64]*InstructionState)
+var (
+	windowsStates = make(map[int64]*InstructionState)
+	androidStates = make(map[int64]*InstructionState)
+	iosStates     = make(map[int64]*InstructionState)
+)
+
+const startText = `👋 Добро пожаловать в **HappyCat VPN**!
+
+🔒 С нашим сервисом вы получите:
+• Быстрый и стабильный доступ к интернету без ограничений
+• Надёжное шифрование и защиту ваших данных
+• Подключение в пару кликов
+
+🎁 Новым пользователям доступен **бесплатный пробный период на 3 дня** — попробуйте VPN и оцените качество без рисков!
+
+➡️ Нажмите «🆓 Пробный доступ», чтобы подключить пробный доступ.
+	Для подключения используйте инструкцию!`
+
 var lastActionKey = make(map[int64]map[string]time.Time)
+
+const vpnCost int = 180
 
 func canProceedKey(userID int64, key string, interval time.Duration) bool {
 	now := time.Now()
@@ -61,23 +91,24 @@ func main() {
 			}
 
 			if update.Message.IsCommand() && update.Message.Command() == "start" {
-				msg := tgbotapi.NewMessage(update.Message.Chat.ID, "Меню:")
+				sendStart(bot, update.Message.Chat.ID)
+				time.Sleep(1 * time.Second)
+
+				msg := tgbotapi.NewMessage(update.Message.Chat.ID, "Меню под клавиатурой:")
 				msg.ReplyMarkup = menuKeyboard()
 				bot.Send(msg)
 				continue
 			}
 
-			msg := tgbotapi.NewMessage(update.Message.Chat.ID, "Меню:")
-			msg.ReplyMarkup = menuKeyboard()
-
 			switch update.Message.Text {
-			// case "Удалить":
-			// 	pfsenseClient.DeleteUserCertificate("4")
-			case "Получить VPN":
+			case "🔑 Получить VPN":
 				if !canProceedKey(update.Message.From.ID, "get_vpn", 5*time.Second) {
 					bot.Send(tgbotapi.NewMessage(update.Message.Chat.ID, "⏳ Подождите ~5 сек перед повторной выдачей VPN"))
 					break
 				}
+
+				msgWait := tgbotapi.NewMessage(update.Message.Chat.ID, "Пожалуйста подождите...")
+				bot.Send(msgWait)
 
 				telegramUserid := fmt.Sprint(update.Message.From.ID)
 				_, isExist := pfsenseClient.IsUserExist(telegramUserid)
@@ -89,18 +120,17 @@ func main() {
 						createUserAndSendCertificate(update, pfsenseClient, bot)
 					} else {
 						certID, _ := pfsenseClient.GetCertificateIDByRefid(certRefID)
-						_, _, expired, _ := pfsenseClient.GetDateOfCertificate(certID)
+						_, _, _, expired, _ := pfsenseClient.GetDateOfCertificate(certID)
 						// expired := true
 						if expired {
 							msg := tgbotapi.NewMessage(update.Message.Chat.ID, "Ваша подписка истекла! Чтобы получить VPN пожалуйста обновите подписку!")
 							bot.Send(msg)
 
-							amount := 250
-							_ = sendStarsInvoice(bot, update.Message.Chat.ID, amount)
+							_ = sendStarsInvoice(bot, update.Message.Chat.ID, vpnCost)
 						} else {
-							_, certDateUntil, _, _ := pfsenseClient.GetDateOfCertificate(certID)
+							_, certDateUntil, _, _, _ := pfsenseClient.GetDateOfCertificate(certID)
 
-							sendCertificate(certRefID, telegramUserid, certDateUntil, update, pfsenseClient, bot)
+							sendCertificate(certRefID, telegramUserid, certDateUntil, false, update, pfsenseClient, bot)
 							// createUserAndSendCertificate(update, pfsenseClient, bot)
 						}
 					}
@@ -108,57 +138,136 @@ func main() {
 					msg := tgbotapi.NewMessage(update.Message.Chat.ID, "Здравствуйте! Чтобы получить VPN оплатите подписку!")
 					bot.Send(msg)
 
-					amount := 250
-					_ = sendStarsInvoice(bot, update.Message.Chat.ID, amount)
+					// amount := 250
+					_ = sendStarsInvoice(bot, update.Message.Chat.ID, vpnCost)
 				}
 
-			case "Инструкция по использованию":
+				sendMessageToAdmin(fmt.Sprintf("Юзер с id:%d нажал на кнопку Получить VPN...", update.Message.From.ID), update.Message.From.UserName, bot)
+
+				continue
+
+			case "📖 Инструкция":
 				buttons := tgbotapi.NewInlineKeyboardMarkup(
 					tgbotapi.NewInlineKeyboardRow(
-						tgbotapi.NewInlineKeyboardButtonData("Windows", "windows"),
-						tgbotapi.NewInlineKeyboardButtonData("Android", "android"),
+						tgbotapi.NewInlineKeyboardButtonData("🪟 Windows", "windows"),
+						tgbotapi.NewInlineKeyboardButtonData("📱 Android", "android"),
 					),
 					tgbotapi.NewInlineKeyboardRow(
-						tgbotapi.NewInlineKeyboardButtonData("IOS", "ios"),
+						tgbotapi.NewInlineKeyboardButtonData("🍎 IOS", "ios"),
 					),
 				)
 
 				msg := tgbotapi.NewMessage(update.Message.Chat.ID, "Выберите действие:")
 				msg.ReplyMarkup = buttons
-				bot.Send(msg)
-				// instructionWindows(update, bot)
+				instructionMessage, _ = bot.Send(msg)
 
-			case "Проверить статус":
+				sendMessageToAdmin(fmt.Sprintf("Юзер с id:%d нажал на кнопку Инструкции...", update.Message.From.ID), update.Message.From.UserName, bot)
+				// instructionWindows(update, bot)
+				continue
+
+			case "📊 Проверить статус":
 				if !canProceedKey(update.Message.From.ID, "check_status", 3*time.Second) {
 					bot.Send(tgbotapi.NewMessage(update.Message.Chat.ID, "⏳ Чуть позже, подождите пару секунд"))
 					break
 				}
 				checkStatus(pfsenseClient, update, bot)
+
+				sendMessageToAdmin(fmt.Sprintf("Юзер с id:%d нажал на кнопку Проверки статуса...", update.Message.From.ID), update.Message.From.UserName, bot)
+
+				continue
+
+			case "💬 Поддержка":
+				supportText := `🛠️ <b>Техническая поддержка</b>
+
+Если у вас возникли проблемы:
+• 🔧 Телеграм: https://t.me/happycatvpn
+
+⏰ <i>Время ответа: до 24 часов</i>`
+
+				msg := tgbotapi.NewMessage(update.Message.Chat.ID, supportText)
+				msg.ParseMode = "HTML"
+				bot.Send(msg)
+
+				sendMessageToAdmin(fmt.Sprintf("Юзер с id:%d нажал на кнопку Поддержки...", update.Message.From.ID), update.Message.From.UserName, bot)
+
+				continue
+
+			case "🆓 Пробный доступ":
+
+				msgWait := tgbotapi.NewMessage(update.Message.Chat.ID, "Пожалуйста подождите...")
+				bot.Send(msgWait)
+
+				if !canProceedKey(update.Message.From.ID, "get_vpn_trial", 5*time.Second) {
+					bot.Send(tgbotapi.NewMessage(update.Message.Chat.ID, "⏳ Подождите ~5 сек перед повторной выдачей VPN"))
+					break
+				}
+
+				createProbCertificate(update, pfsenseClient, bot)
+				sendMessageToAdmin(fmt.Sprintf("Юзер с id:%d нажал на кнопку Пробного доступа...", update.Message.From.ID), update.Message.From.UserName, bot)
+
+				continue
+
 			}
+
+			msg := tgbotapi.NewMessage(update.Message.Chat.ID, "Меню:")
+			msg.ReplyMarkup = menuKeyboard()
+			bot.Send(msg)
 		}
 
 		if cq := update.CallbackQuery; cq != nil && cq.Message != nil {
 
 			chatID := cq.Message.Chat.ID
-			userID := cq.From.ID
 
-			if !canProceedKey(userID, "instructions", 5*time.Second) {
-				bot.Send(tgbotapi.NewMessage(chatID, "⏳ Подождите немного перед повторным запросом инструкции"))
-				bot.Request(tgbotapi.NewCallback(cq.ID, "")) // ответить, чтобы часы не висели
-				continue
+			if strings.HasPrefix(cq.Data, "win_prev_") {
+				// Обработка кнопки "Назад"
+				currentStep, _ := strconv.Atoi(strings.TrimPrefix(cq.Data, "win_prev_"))
+				newStep := currentStep - 1
+				instructionWindows(chatID, bot, newStep)
+
+			} else if strings.HasPrefix(cq.Data, "win_next_") {
+				// Обработка кнопки "Вперед"
+				currentStep, _ := strconv.Atoi(strings.TrimPrefix(cq.Data, "win_next_"))
+				newStep := currentStep + 1
+				instructionWindows(chatID, bot, newStep)
+			}
+
+			if strings.HasPrefix(cq.Data, "android_prev_") {
+				currentStep, _ := strconv.Atoi(strings.TrimPrefix(cq.Data, "android_prev_"))
+				instructionAndroid(chatID, bot, currentStep-1)
+			} else if strings.HasPrefix(cq.Data, "android_next_") {
+				currentStep, _ := strconv.Atoi(strings.TrimPrefix(cq.Data, "android_next_"))
+				instructionAndroid(chatID, bot, currentStep+1)
+			}
+
+			// Обработка iOS
+			if strings.HasPrefix(cq.Data, "ios_prev_") {
+				currentStep, _ := strconv.Atoi(strings.TrimPrefix(cq.Data, "ios_prev_"))
+				instructionIos(chatID, bot, currentStep-1)
+			} else if strings.HasPrefix(cq.Data, "ios_next_") {
+				currentStep, _ := strconv.Atoi(strings.TrimPrefix(cq.Data, "ios_next_"))
+				instructionIos(chatID, bot, currentStep+1)
 			}
 
 			switch cq.Data {
 			case "windows":
-				instructionWindows(chatID, bot)
+				instructionWindows(chatID, bot, 0)
 			case "android":
-				instructionAndroid(chatID, bot)
+				instructionAndroid(chatID, bot, 0)
 			case "ios":
-				instructionIos(chatID, bot)
+				instructionIos(chatID, bot, 0)
+				// case "trial":
+				// 	createProbCertificate(update, pfsenseClient, bot)
 			}
-			bot.Request(tgbotapi.NewCallback(cq.ID, "✅"))
+			bot.Request(tgbotapi.NewCallback(cq.ID, ""))
 		}
 	}
+}
+
+func sendMessageToAdmin(text string, username string, bot *tgbotapi.BotAPI) {
+
+	newText := fmt.Sprintf("@%s:\n%s", username, text)
+	msg := tgbotapi.NewMessage(623290294, newText)
+	bot.Send(msg)
 }
 
 func checkStatus(pfsenseClient *pfsense.PfSenseClient, update tgbotapi.Update, bot *tgbotapi.BotAPI) {
@@ -173,80 +282,301 @@ func checkStatus(pfsenseClient *pfsense.PfSenseClient, update tgbotapi.Update, b
 		colorfulprint.PrintState(fmt.Sprintf("Founded attached cert id:%s of USER:%d and OUR ID OF CERT:%s\n", certRefID, update.Message.From.ID, certId))
 	}
 
-	from, until, expired, err := pfsenseClient.GetDateOfCertificate(certId)
+	from, until, daysLeft, expired, err := pfsenseClient.GetDateOfCertificate(certId)
 	if err != nil {
 		colorfulprint.PrintError(fmt.Sprintf("Couldnt get date of certificate{%s}\n", certId), err)
 	}
 
-	var status string
-
+	var statusIcon, statusText string
 	if expired {
-		status = "Истек"
+		statusIcon = "❌"
+		statusText = "Истекла"
 	} else {
-		status = "Работает"
+		statusIcon = "✅"
+		statusText = "Активна"
 	}
 
-	text := fmt.Sprintf("Ваш подписка оплачена с %s и длится до %s\nСтатус работы: %s", from, until, status)
+	text := fmt.Sprintf(`📊 <b>Статус вашей подписки</b>
+
+%s <b>Статус:</b> %s
+📅 <b>Начало:</b> %s
+⏰ <b>Окончание:</b> %s
+—————————————————
+💡 Осталось: %d дней`,
+		statusIcon, statusText, from, until, daysLeft)
+
 	msg := tgbotapi.NewMessage(update.Message.Chat.ID, text)
-	bot.Send(msg)
-}
-
-func instructionWindows(chatID int64, bot *tgbotapi.BotAPI) {
-	photo1 := tgbotapi.NewPhoto(chatID, tgbotapi.FilePath("InstructionPhotos/Windows/1.png"))
-	photo1.Caption = "1) Скачайте <a href=\"https://openvpn.net/community/\">OpenVPN</a> с официального сайта \n"
-	photo1.ParseMode = "HTML"
-
-	photo2 := tgbotapi.NewPhoto(chatID, tgbotapi.FilePath("InstructionPhotos/Windows/2.png"))
-	photo2.Caption = "2) После скачивания откройте трей в правом нижнем углу \n"
-
-	photo3 := tgbotapi.NewPhoto(chatID, tgbotapi.FilePath("InstructionPhotos/Windows/3.png"))
-	photo3.Caption = "3) Нажмите правой кнопкой мыши по значку OpenVPN и далее Импорт->Импорт файла конфигурации и выберите файл конфигурации который мы вам отправим\n"
-
-	photo4 := tgbotapi.NewPhoto(chatID, tgbotapi.FilePath("InstructionPhotos/Windows/4.png"))
-	photo4.Caption = "4) Далее нажмите правой кнопкой по значку снова и нажмите кнопку Подключиться\n"
-
-	bot.Send(photo1)
-	bot.Send(photo2)
-	bot.Send(photo3)
-	bot.Send(photo4)
-}
-
-func instructionAndroid(chatID int64, bot *tgbotapi.BotAPI) {
-	msg := tgbotapi.NewMessage(chatID, "1) Скачайте <a href=\"https://play.google.com/store/apps/details?id=net.openvpn.openvpn\">OpenVPN</a> с GooglePlay \n")
 	msg.ParseMode = "HTML"
 	bot.Send(msg)
 
-	bot.Send(tgbotapi.NewPhoto(chatID, tgbotapi.FilePath("InstructionPhotos/Android/1.jpg")))
-	p2 := tgbotapi.NewPhoto(chatID, tgbotapi.FilePath("InstructionPhotos/Android/2.jpg"))
-	p2.Caption = "3) Нажмите на файл и выберите в меню OpenVPN"
-	bot.Send(p2)
-	p3 := tgbotapi.NewPhoto(chatID, tgbotapi.FilePath("InstructionPhotos/Android/3.jpg"))
-	p3.Caption = "4) Нажмите OK и подключитесь"
-	bot.Send(p3)
 }
 
-func instructionIos(chatID int64, bot *tgbotapi.BotAPI) {
-	msg := tgbotapi.NewMessage(chatID, "1) Скачайте <a href=\"https://apps.apple.com/au/app/openvpn-connect/id590379981\">OpenVPN</a> с AppStore \n")
-	msg.ParseMode = "HTML"
-	bot.Send(msg)
+func instructionWindows(chatID int64, bot *tgbotapi.BotAPI, step int) {
+	steps := []struct {
+		photoPath string
+		caption   string
+	}{
+		{
+			"InstructionPhotos/Windows/1.png",
+			"1) Скачайте <a href=\"https://openvpn.net/community/\">OpenVPN</a> с официального сайта",
+		},
+		{
+			"InstructionPhotos/Windows/2.png",
+			"2) После скачивания откройте трей в правом нижнем углу",
+		},
+		{
+			"InstructionPhotos/Windows/3.png",
+			"3) Нажмите правой кнопкой мыши по значку OpenVPN и далее Импорт->Импорт файла конфигурации и выберите файл конфигурации который мы вам отправим",
+		},
+		{
+			"InstructionPhotos/Windows/4.png",
+			"4) Далее нажмите правой кнопкой по значку снова и нажмите кнопку Подключиться",
+		},
+	}
 
-	bot.Send(tgbotapi.NewPhoto(chatID, tgbotapi.FilePath("InstructionPhotos/Ios/1.jpg")))
-	p2 := tgbotapi.NewPhoto(chatID, tgbotapi.FilePath("InstructionPhotos/Ios/2.jpg"))
-	p2.Caption = "3) Найдите файл сертификата"
-	bot.Send(p2)
-	p4 := tgbotapi.NewPhoto(chatID, tgbotapi.FilePath("InstructionPhotos/Ios/4.png"))
-	p4.Caption = "4) Откройте через OpenVPN"
-	bot.Send(p4)
-	bot.Send(tgbotapi.NewPhoto(chatID, tgbotapi.FilePath("InstructionPhotos/Ios/5.jpg")))
+	// Проверяем границы шагов
+	if step < 0 {
+		step = 0
+	}
+	if step >= len(steps) {
+		step = len(steps) - 1
+	}
+
+	// Удаляем предыдущее сообщение если есть
+	if state, exists := windowsStates[chatID]; exists && state.MessageID != 0 {
+		deleteMsg := tgbotapi.NewDeleteMessage(chatID, state.MessageID)
+		bot.Send(deleteMsg)
+	}
+
+	// Создаем кнопки навигации
+	var row []tgbotapi.InlineKeyboardButton
+
+	if step > 0 {
+		row = append(row, tgbotapi.NewInlineKeyboardButtonData("⬅️ Назад", fmt.Sprintf("win_prev_%d", step)))
+	}
+
+	row = append(row, tgbotapi.NewInlineKeyboardButtonData(
+		fmt.Sprintf("Шаг %d/%d", step+1, len(steps)), "win_current"))
+
+	if step < len(steps)-1 {
+		row = append(row, tgbotapi.NewInlineKeyboardButtonData("Вперед ➡️", fmt.Sprintf("win_next_%d", step)))
+	}
+
+	keyboard := tgbotapi.NewInlineKeyboardMarkup(row)
+
+	// Отправляем новое сообщение с фото
+	photo := tgbotapi.NewPhoto(chatID, tgbotapi.FilePath(steps[step].photoPath))
+	photo.Caption = steps[step].caption
+	photo.ParseMode = "HTML"
+	photo.ReplyMarkup = keyboard
+
+	msg, err := bot.Send(photo)
+	if err != nil {
+		log.Printf("Error sending photo: %v", err)
+		return
+	}
+
+	// Сохраняем состояние
+	windowsStates[chatID] = &InstructionState{
+		CurrentStep: step,
+		MessageID:   msg.MessageID,
+		ChatID:      chatID,
+	}
+}
+
+func instructionAndroid(chatID int64, bot *tgbotapi.BotAPI, step int) {
+	steps := []struct {
+		photoPath string
+		caption   string
+	}{
+		{
+			"",
+			"1) Скачайте <a href=\"https://play.google.com/store/apps/details?id=net.openvpn.openvpn\">OpenVPN</a> с GooglePlay",
+		},
+		{
+			"InstructionPhotos/Android/1.jpg",
+			"2) Откройте файловый менеджер и найдите там файл сертификата",
+		},
+		{
+			"InstructionPhotos/Android/2.jpg",
+			"3) Нажмите на файл и выберите в меню OpenVPN",
+		},
+		{
+			"InstructionPhotos/Android/3.jpg",
+			"4) Нажмите OK и подключитесь",
+		},
+	}
+
+	// Проверяем границы шагов
+	if step < 0 {
+		step = 0
+	}
+	if step >= len(steps) {
+		step = len(steps) - 1
+	}
+
+	// Удаляем предыдущее сообщение если есть
+	if state, exists := androidStates[chatID]; exists && state.MessageID != 0 {
+		deleteMsg := tgbotapi.NewDeleteMessage(chatID, state.MessageID)
+		bot.Send(deleteMsg)
+	}
+
+	// Создаем кнопки навигации
+	var row []tgbotapi.InlineKeyboardButton
+
+	if step > 0 {
+		row = append(row, tgbotapi.NewInlineKeyboardButtonData("⬅️ Назад", fmt.Sprintf("android_prev_%d", step)))
+	}
+
+	row = append(row, tgbotapi.NewInlineKeyboardButtonData(
+		fmt.Sprintf("Android %d/%d", step+1, len(steps)), "android_current"))
+
+	if step < len(steps)-1 {
+		row = append(row, tgbotapi.NewInlineKeyboardButtonData("Вперед ➡️", fmt.Sprintf("android_next_%d", step)))
+	}
+
+	keyboard := tgbotapi.NewInlineKeyboardMarkup(row)
+
+	// Для первого шага (без фото) отправляем текстовое сообщение
+	if step == 0 {
+		msg := tgbotapi.NewMessage(chatID, steps[step].caption)
+		msg.ParseMode = "HTML"
+		msg.ReplyMarkup = keyboard
+
+		sentMsg, err := bot.Send(msg)
+		if err == nil {
+			androidStates[chatID] = &InstructionState{
+				CurrentStep: step,
+				MessageID:   sentMsg.MessageID,
+				ChatID:      chatID,
+			}
+		}
+		return
+	}
+
+	// Для остальных шагов отправляем фото
+	photo := tgbotapi.NewPhoto(chatID, tgbotapi.FilePath(steps[step].photoPath))
+	photo.Caption = steps[step].caption
+	photo.ParseMode = "HTML"
+	photo.ReplyMarkup = keyboard
+
+	msg, err := bot.Send(photo)
+	if err != nil {
+		log.Printf("Error sending Android photo: %v", err)
+		return
+	}
+
+	// Сохраняем состояние
+	androidStates[chatID] = &InstructionState{
+		CurrentStep: step,
+		MessageID:   msg.MessageID,
+		ChatID:      chatID,
+	}
+}
+func instructionIos(chatID int64, bot *tgbotapi.BotAPI, step int) {
+	steps := []struct {
+		photoPath string
+		caption   string
+	}{
+		{
+			"",
+			"1) Скачайте <a href=\"https://apps.apple.com/au/app/openvpn-connect/id590379981\">OpenVPN</a> с AppStore",
+		},
+		{
+			"InstructionPhotos/Ios/1.jpg",
+			"2) Откройте файловый менеджер на вашем устройстве",
+		},
+		{
+			"InstructionPhotos/Ios/2.jpg",
+			"3) Найдите файл сертификата",
+		},
+		{
+			"InstructionPhotos/Ios/4.png",
+			"4) Откройте через OpenVPN",
+		},
+		{
+			"InstructionPhotos/Ios/5.jpg",
+			"5) Нажмите кнопку ADD и подключайтесь!",
+		},
+	}
+
+	// Проверяем границы шагов
+	if step < 0 {
+		step = 0
+	}
+	if step >= len(steps) {
+		step = len(steps) - 1
+	}
+
+	// Удаляем предыдущее сообщение если есть
+	if state, exists := iosStates[chatID]; exists && state.MessageID != 0 {
+		deleteMsg := tgbotapi.NewDeleteMessage(chatID, state.MessageID)
+		bot.Send(deleteMsg)
+	}
+
+	// Создаем кнопки навигации
+	var row []tgbotapi.InlineKeyboardButton
+
+	if step > 0 {
+		row = append(row, tgbotapi.NewInlineKeyboardButtonData("⬅️ Назад", fmt.Sprintf("ios_prev_%d", step)))
+	}
+
+	row = append(row, tgbotapi.NewInlineKeyboardButtonData(
+		fmt.Sprintf("iOS %d/%d", step+1, len(steps)), "ios_current"))
+
+	if step < len(steps)-1 {
+		row = append(row, tgbotapi.NewInlineKeyboardButtonData("Вперед ➡️", fmt.Sprintf("ios_next_%d", step)))
+	}
+
+	keyboard := tgbotapi.NewInlineKeyboardMarkup(row)
+
+	// Для первого шага (без фото) отправляем текстовое сообщение
+	if step == 0 {
+		msg := tgbotapi.NewMessage(chatID, steps[step].caption)
+		msg.ParseMode = "HTML"
+		msg.ReplyMarkup = keyboard
+
+		sentMsg, err := bot.Send(msg)
+		if err == nil {
+			iosStates[chatID] = &InstructionState{
+				CurrentStep: step,
+				MessageID:   sentMsg.MessageID,
+				ChatID:      chatID,
+			}
+		}
+		return
+	}
+
+	// Для остальных шагов отправляем фото
+	photo := tgbotapi.NewPhoto(chatID, tgbotapi.FilePath(steps[step].photoPath))
+	photo.Caption = steps[step].caption
+	photo.ParseMode = "HTML"
+	photo.ReplyMarkup = keyboard
+
+	msg, err := bot.Send(photo)
+	if err != nil {
+		log.Printf("Error sending iOS photo: %v", err)
+		return
+	}
+
+	// Сохраняем состояние
+	iosStates[chatID] = &InstructionState{
+		CurrentStep: step,
+		MessageID:   msg.MessageID,
+		ChatID:      chatID,
+	}
 }
 
 func menuKeyboard() tgbotapi.ReplyKeyboardMarkup {
 	kb := tgbotapi.NewReplyKeyboard(
 		tgbotapi.NewKeyboardButtonRow(
-			tgbotapi.NewKeyboardButton("Получить VPN"),
-			tgbotapi.NewKeyboardButton("Проверить статус"),
-			// tgbotapi.NewKeyboardButton("Оплатить"),
-			tgbotapi.NewKeyboardButton("Инструкция по использованию"),
+			tgbotapi.NewKeyboardButton("🔑 Получить VPN"),
+			tgbotapi.NewKeyboardButton("🆓 Пробный доступ"),
+			tgbotapi.NewKeyboardButton("📊 Проверить статус"),
+		),
+		tgbotapi.NewKeyboardButtonRow(
+			tgbotapi.NewKeyboardButton("📖 Инструкция"),
+			tgbotapi.NewKeyboardButton("💬 Поддержка"),
 		),
 	)
 	kb.ResizeKeyboard = true
@@ -255,8 +585,6 @@ func menuKeyboard() tgbotapi.ReplyKeyboardMarkup {
 }
 
 func createUserAndSendCertificate(update tgbotapi.Update, pfsenseClient *pfsense.PfSenseClient, bot *tgbotapi.BotAPI) {
-	msgWait := tgbotapi.NewMessage(update.Message.Chat.ID, "Пожалуйста подождите...")
-	bot.Send(msgWait)
 
 	telegramUserid := fmt.Sprint(update.Message.From.ID)
 	certName := fmt.Sprintf("Cert%s", telegramUserid)
@@ -280,18 +608,18 @@ func createUserAndSendCertificate(update tgbotapi.Update, pfsenseClient *pfsense
 		colorfulprint.PrintError(fmt.Sprintf("Couldnt find attached certificate on user{%s}\n", telegramUserid), err)
 
 		uuid, _ := pfsenseClient.GetCARef()
-		certID, certRefID, _ = pfsenseClient.CreateCertificate(certName, uuid, "RSA", 2048, "", "sha256", telegramUserid)
+		certID, certRefID, _ = pfsenseClient.CreateCertificate(certName, uuid, "RSA", 2048, 30, "", "sha256", telegramUserid)
 		pfsenseClient.AttachCertificateToUser(userID, certRefID)
 	} else {
 		certID, _ = pfsenseClient.GetCertificateIDByRefid(certRefID)
-		_, _, expired, _ := pfsenseClient.GetDateOfCertificate(certID)
+		_, _, _, expired, _ := pfsenseClient.GetDateOfCertificate(certID)
 		// expired := true
 		if expired {
 			// Логика удаления !!!!!!!!!
 			pfsenseClient.DeleteUserCertificate(certID)
 			//После удаления создаем новый сертификат и привязываем его к пользователю
 			uuid, _ := pfsenseClient.GetCARef()
-			certID, certRefID, _ = pfsenseClient.CreateCertificate(certName, uuid, "RSA", 2048, "", "sha256", telegramUserid)
+			certID, certRefID, _ = pfsenseClient.CreateCertificate(certName, uuid, "RSA", 2048, 30, "", "sha256", telegramUserid)
 			pfsenseClient.AttachCertificateToUser(userID, certRefID)
 
 			msg := tgbotapi.NewMessage(update.Message.Chat.ID, "Создан новый сертификат!")
@@ -299,19 +627,8 @@ func createUserAndSendCertificate(update tgbotapi.Update, pfsenseClient *pfsense
 		}
 	}
 
-	// id, err := pfsenseClient.CreateUser(userIdStr, "123", "", "", false)
-	// if err != nil {
-	// 	fmt.Printf("Couldnt create user, trying to find existing...")
-	// 	id, _, _ = pfsenseClient.GetAttachedCertRedIDByUserName(fmt.Sprint(update.Message.From.ID))
-	// }
+	_, certDateUntil, _, _, _ := pfsenseClient.GetDateOfCertificate(certID)
 
-	// uuid, _ := pfsenseClient.GetCARef()
-	// certID, certRefID, _ := pfsenseClient.CreateCertificate(certName, uuid, "RSA", 2048, "", "sha256", telegramUserid)
-	// pfsenseClient.AttachCertificateToUser(id, certRefID)
-
-	_, certDateUntil, _, _ := pfsenseClient.GetDateOfCertificate(certID)
-
-	// pfsenseClient.ExportCertificateP12(certRefID, "")
 	ovpnData, err := pfsenseClient.GenerateOVPN(certRefID, "", "213.21.200.205")
 	if err != nil {
 		msg := tgbotapi.NewMessage(update.Message.Chat.ID, "Error generating OVPN: "+err.Error())
@@ -333,17 +650,51 @@ func createUserAndSendCertificate(update tgbotapi.Update, pfsenseClient *pfsense
 	bot.Send(msg)
 }
 
+func createProbCertificate(update tgbotapi.Update, pfsenseClient *pfsense.PfSenseClient, bot *tgbotapi.BotAPI) {
+
+	telegramUserid := fmt.Sprint(update.Message.From.ID)
+	certName := fmt.Sprintf("TrialCert%s", telegramUserid)
+
+	var certRefID string
+	var certID string
+	// var err error
+
+	certRefID, certID, err := pfsenseClient.GetCertificateIDByName(certName)
+
+	if err != nil {
+		uuid, _ := pfsenseClient.GetCARef()
+		certID, certRefID, _ = pfsenseClient.CreateCertificate(certName, uuid, "RSA", 2048, 3, "", "sha256", telegramUserid)
+		_, certDateUntil, _, _, _ := pfsenseClient.GetDateOfCertificate(certID)
+
+		sendCertificate(certRefID, telegramUserid, certDateUntil, true, update, pfsenseClient, bot)
+
+	} else {
+		_, certDateUntil, _, expired, _ := pfsenseClient.GetDateOfCertificate(certID)
+
+		// expired := true
+		if expired {
+			msg := tgbotapi.NewMessage(update.Message.Chat.ID, "Ваш пробный доступ к VPN закончился. Предлагаем продолжить пользоваться нашими услугами и оплатить подписку!")
+			bot.Send(msg)
+		} else {
+			sendCertificate(certRefID, telegramUserid, certDateUntil, true, update, pfsenseClient, bot)
+		}
+	}
+}
+
 func sendStarsInvoice(bot *tgbotapi.BotAPI, chatID int64, amountStars int) error {
 	// if amountStars <= 0 {
 	// 	amountStars = 1
 	// }
 	prices := []tgbotapi.LabeledPrice{
-		{Label: "VPN доступ", Amount: amountStars}, // РОВНО один LabeledPrice
+		{Label: "VPN Premium на 30 дней", Amount: amountStars},
 	}
 	inv := tgbotapi.NewInvoice(
 		chatID,
-		"VPN доступ",
-		"Доступ к VPN конфигу для OpenVPN",
+		"🔐 Premium VPN доступ",
+		`🎯 Полный доступ ко всем серверам
+⚡ Максимальная скорость
+📞 Круглосуточная поддержка
+🔄 Легкое продление`,
 		"order_"+strconv.Itoa(amountStars),
 		"",
 		"",
@@ -354,10 +705,10 @@ func sendStarsInvoice(bot *tgbotapi.BotAPI, chatID int64, amountStars int) error
 	// добавь строку:
 	inv.SuggestedTipAmounts = []int{}
 
-	// Можно картинку (не обязательно)
-	// inv.PhotoURL = "https://picsum.photos/seed/vpn/600/400"
+	// inv.PhotoURL = "https://img.freepik.com/free-vector/secure-cloud-computing-vector-illustration_53876-76148.jpg"
+	// inv.PhotoWidth = 600
+	// inv.PhotoHeight = 400
 
-	// никакие NeedName/NeedEmail не нужны для цифровых
 	_, err := bot.Send(inv)
 	return err
 }
@@ -391,14 +742,19 @@ func handleSuccessfulPayment(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, pfsens
 
 	// Подтверждение пользователю
 	_, _ = bot.Send(tgbotapi.NewMessage(msg.Chat.ID, "Оплата получена. Отправляем VPN... ✅"))
+
+	sendMessageToAdmin(fmt.Sprintf("Юзер с id:%d оплатил подписку на VPN!", msg.From.ID), msg.From.UserName, bot)
 }
 
-func sendCertificate(certRefID, telegramUserid, certDateUntil string, update tgbotapi.Update, pfsenseClient *pfsense.PfSenseClient, bot *tgbotapi.BotAPI) {
+func sendCertificate(certRefID, telegramUserid, certDateUntil string, isProb bool, update tgbotapi.Update, pfsenseClient *pfsense.PfSenseClient, bot *tgbotapi.BotAPI) {
 
-	msgWait := tgbotapi.NewMessage(update.Message.Chat.ID, "Пожалуйста подождите...")
-	bot.Send(msgWait)
+	var certName string
 
-	certName := fmt.Sprintf("Cert%s", telegramUserid)
+	if isProb {
+		certName = fmt.Sprintf("TrialCert%s", telegramUserid)
+	} else {
+		certName = fmt.Sprintf("Cert%s", telegramUserid)
+	}
 
 	ovpnData, err := pfsenseClient.GenerateOVPN(certRefID, "", "213.21.200.205")
 	if err != nil {
@@ -420,4 +776,20 @@ func sendCertificate(certRefID, telegramUserid, certDateUntil string, update tgb
 	msg.ReplyToMessageID = update.Message.MessageID
 	bot.Send(msg)
 
+}
+
+func sendStart(bot *tgbotapi.BotAPI, chatID int64) {
+	// kb := tgbotapi.NewInlineKeyboardMarkup(
+	// 	tgbotapi.NewInlineKeyboardRow(
+	// 		tgbotapi.NewInlineKeyboardButtonData("🎁 Пробный доступ", "trial"),
+	// 	),
+	// )
+
+	msg := tgbotapi.NewMessage(chatID, startText)
+	msg.ParseMode = "Markdown"
+	// msg.ReplyMarkup = kb
+
+	if _, err := bot.Send(msg); err != nil {
+		log.Println("sendStart error:", err)
+	}
 }
