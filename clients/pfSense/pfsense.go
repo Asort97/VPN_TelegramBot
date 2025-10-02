@@ -2,6 +2,7 @@ package pfsense
 
 import (
 	"bytes"
+	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
 	"encoding/pem"
@@ -20,6 +21,7 @@ import (
 type PfSenseClient struct {
 	apiKey      string
 	tlsCryptKey []byte
+	http        *http.Client // 👈 добавляем
 }
 
 type CertificateRequest struct {
@@ -40,9 +42,17 @@ type Certificate struct {
 }
 
 func New(apiKey string, tlsCryptKey []byte) *PfSenseClient {
+	tr := &http.Transport{
+		TLSClientConfig: &tls.Config{
+			InsecureSkipVerify: true,
+			ServerName:         "drake2.eunet.lv",
+		},
+	}
+
 	return &PfSenseClient{
 		apiKey:      apiKey,
-		tlsCryptKey: tlsCryptKey}
+		tlsCryptKey: tlsCryptKey,
+		http:        &http.Client{Transport: tr}}
 }
 
 func (c *PfSenseClient) IsUserExist(userName string) (string, bool) {
@@ -53,7 +63,7 @@ func (c *PfSenseClient) IsUserExist(userName string) (string, bool) {
 	}
 	reqU.Header.Set("X-API-Key", c.apiKey)
 
-	respU, err := (&http.Client{}).Do(reqU)
+	respU, err := c.http.Do(reqU)
 	if err != nil {
 		return "", false
 	}
@@ -114,8 +124,8 @@ func (c *PfSenseClient) CreateUser(username, password, fullName, email string, d
 	req.Header.Set("X-API-Key", c.apiKey)
 	req.Header.Set("Content-Type", "application/json")
 
-	client := &http.Client{}
-	resp, err := client.Do(req)
+	// client := &http.Client{}
+	resp, err := c.http.Do(req)
 	if err != nil {
 		return "", colorfulprint.PrintError("error sending request: %w", err)
 	}
@@ -179,8 +189,8 @@ func (c *PfSenseClient) CreateCertificate(descr, caref, keytype string, keylen, 
 	req.Header.Set("X-API-Key", c.apiKey)
 	req.Header.Set("Content-Type", "application/json")
 
-	client := &http.Client{}
-	resp, err := client.Do(req)
+	// client := &http.Client{}
+	resp, err := c.http.Do(req)
 	if err != nil {
 		return "", "", colorfulprint.PrintError("error sending request: %w", err)
 	}
@@ -222,8 +232,8 @@ func (c *PfSenseClient) GetCARef() (string, error) {
 
 	req.Header.Set("X-API-Key", c.apiKey)
 
-	client := &http.Client{}
-	resp, err := client.Do(req)
+	// client := &http.Client{}
+	resp, err := c.http.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("error sending request: %w", err)
 	}
@@ -279,9 +289,9 @@ func (c *PfSenseClient) AttachCertificateToUser(userId, certId string) error {
 	req.Header.Set("X-API-Key", c.apiKey)
 	req.Header.Set("Content-Type", "application/json")
 
-	client := &http.Client{}
+	// client := &http.Client{}
 
-	resp, err := client.Do(req)
+	resp, err := c.http.Do(req)
 	if err != nil {
 		return fmt.Errorf("couldnt send request %w", err)
 	}
@@ -334,8 +344,8 @@ func (c *PfSenseClient) ExportCertificateP12(certRef, passphrase string) ([]byte
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/octet-stream")
 
-	client := &http.Client{}
-	resp, err := client.Do(req)
+	// client := &http.Client{}
+	resp, err := c.http.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to send request: %w", err)
 	}
@@ -377,8 +387,8 @@ func (c *PfSenseClient) GetDateOfCertificate(id string) (string, string, int, bo
 	}
 	req.Header.Set("X-API-Key", c.apiKey)
 
-	client := &http.Client{}
-	resp, err := client.Do(req)
+	// client := &http.Client{}
+	resp, err := c.http.Do(req)
 	if err != nil {
 		return "nil", "", 0, true, fmt.Errorf("error to get response: %w", err)
 	}
@@ -584,9 +594,9 @@ func (c *PfSenseClient) DeleteUserCertificate(certificateId string) error {
 
 	req.Header.Set("X-API-Key", c.apiKey)
 
-	client := &http.Client{}
+	// client := &http.Client{}
 
-	resp, err := client.Do(req)
+	resp, err := c.http.Do(req)
 	if err != nil {
 		return colorfulprint.PrintError("error sending request: %w", err)
 	}
@@ -603,7 +613,7 @@ func (c *PfSenseClient) GetAttachedCertRefIDByUserName(userName string) (string,
 	}
 	reqU.Header.Set("X-API-Key", c.apiKey)
 
-	respU, err := (&http.Client{}).Do(reqU)
+	respU, err := c.http.Do(reqU)
 	if err != nil {
 		return "", "", err
 	}
@@ -658,7 +668,7 @@ func (c *PfSenseClient) GetCertificateIDByRefid(refID string) (string, error) {
 	}
 	reqU.Header.Set("X-API-Key", c.apiKey)
 
-	respU, err := (&http.Client{}).Do(reqU)
+	respU, err := c.http.Do(reqU)
 	if err != nil {
 		return "", err
 	}
@@ -706,7 +716,7 @@ func (c *PfSenseClient) GetCertificateIDByName(certName string) (string, string,
 	}
 	reqU.Header.Set("X-API-Key", c.apiKey)
 
-	respU, err := (&http.Client{}).Do(reqU)
+	respU, err := c.http.Do(reqU)
 	if err != nil {
 		return "", "", err
 	}
