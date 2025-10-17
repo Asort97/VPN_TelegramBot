@@ -754,3 +754,55 @@ func (c *PfSenseClient) GetCertificateIDByName(certName string) (string, string,
 	colorfulprint.PrintState(fmt.Sprintf("Certificate ID: %d", certID))
 	return "", "", fmt.Errorf("no cert IDs resolved for user")
 }
+
+func (c *PfSenseClient) RenewExistingCertificateByRefid(refId string) error {
+	url := "https://drake2.eunet.lv/api/v2/system/certificate/renew"
+
+	payload := map[string]interface{}{
+		"certref":        refId,
+		"reusekey":       true,
+		"reuseserial":    true,
+		"strictsecurity": true,
+	}
+
+	jsonBody, err := json.Marshal(payload)
+	if err != nil {
+		return colorfulprint.PrintError("failed to marshal json: %w", err)
+	}
+
+	req, err := http.NewRequest("POST", url, bytes.NewBuffer(jsonBody))
+	if err != nil {
+		return colorfulprint.PrintError("Cant request RENEW EXISTING CERT: %w", err)
+	}
+
+	req.Header.Set("X-API-Key", c.apiKey)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return colorfulprint.PrintError("error sending request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+
+	if resp.StatusCode >= 400 {
+		return colorfulprint.PrintError(fmt.Sprintf("failed with status %s: %s", resp.Status, string(body)), nil)
+	}
+
+	// var result struct {
+	// 	Data struct {
+	// 		ID    int    `json:"id"`
+	// 		RefID string `json:"refid"`
+	// 		Descr string `json:"descr"`
+	// 	} `json:"data"`
+	// }
+
+	// if err := json.Unmarshal(body, &result); err != nil {
+	// 	return colorfulprint.PrintError("error parsing json: %w", err)
+	// }
+
+	colorfulprint.PrintState(fmt.Sprintf("Renew cert %s successfully", refId))
+
+	return nil
+}
