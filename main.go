@@ -11,6 +11,7 @@ import (
 	colorfulprint "github.com/Asort97/vpnBot/clients/colorfulPrint"
 	instruct "github.com/Asort97/vpnBot/clients/instruction"
 	pfsense "github.com/Asort97/vpnBot/clients/pfSense"
+	yookassa "github.com/Asort97/vpnBot/clients/yooKassa"
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 )
 
@@ -51,8 +52,8 @@ func canProceedKey(userID int64, key string, interval time.Duration) bool {
 
 func main() {
 	pfsenseApiKey := os.Getenv("PFSENSE_API_KEY")
-	// yookassaApiKey := os.Getenv("YOOKASSA_API_KEY")
-	// yookassaStoreID := os.Getenv("YOOKASSA_STORE_ID")
+	yookassaApiKey := os.Getenv("YOOKASSA_API_KEY")
+	yookassaStoreID := os.Getenv("YOOKASSA_STORE_ID")
 	botToken := os.Getenv("TG_BOT_TOKEN")
 	tlsKey := os.Getenv("TLS_CRYPT_KEY")
 	invoiceToken = os.Getenv("INVOICE_TOKEN")
@@ -60,7 +61,7 @@ func main() {
 	tlsBytes, _ := os.ReadFile(tlsKey)
 
 	pfsenseClient := pfsense.New(pfsenseApiKey, []byte(tlsBytes))
-	// yookassaClient := yookassa.New(yookassaStoreID, yookassaApiKey)
+	yookassaClient := yookassa.New(yookassaStoreID, yookassaApiKey)
 
 	bot, err := tgbotapi.NewBotAPI(botToken)
 	if err != nil {
@@ -73,34 +74,19 @@ func main() {
 	updates := bot.GetUpdatesChan(u)
 
 	for update := range updates {
-
+		colorfulprint.PrintState("Check")
 		if update.PreCheckoutQuery != nil {
 			handlePreCheckout(bot, update.PreCheckoutQuery)
 			continue
 		}
 
 		if update.Message != nil {
+			colorfulprint.PrintState("Check")
 
 			if update.Message.SuccessfulPayment != nil {
 				handleSuccessfulPayment(bot, update.Message, pfsenseClient)
 				continue
 			}
-
-			// ДОБАВЬ ЭТУ ПРОВЕРКУ - если сообщение содержит ID платежа
-			// if strings.HasPrefix(update.Message.Text, "payment_") {
-			// 	paymentID := strings.TrimPrefix(update.Message.Text, "payment_")
-			// 	payment, err := yookassaClient.GetYooKassaPaymentStatus(paymentID)
-			// 	if err == nil && payment.Status == "succeeded" {
-			// 		// Платеж успешен, активируй услугу
-			// 		chatID := int64(payment.Metadata["chat_id"].(float64))
-			// 		product := payment.Metadata["product"].(string)
-			// 		msg := tgbotapi.NewMessage(chatID, fmt.Sprintf("ОПЛАТА ПРОШЛА УСПЕШНА ПРОДУКТ:%s", product))
-			// 		bot.Send(msg)
-			// 		handleSuccessfulPayment(bot, update.Message, pfsenseClient)
-			// 		// activateService(chatID, product, pfsenseClient, bot)
-			// 	}
-			// 	continue
-			// }
 
 			if update.Message.IsCommand() && update.Message.Command() == "start" {
 				sendStart(bot, update.Message.Chat.ID)
@@ -109,7 +95,7 @@ func main() {
 			}
 
 			if update.Message.IsCommand() && update.Message.Command() == "pay" {
-				// yookassaClient.SendVPNPayment(bot, update.Message.Chat.ID, "")
+				yookassaClient.SendVPNPayment(bot, update.Message.Chat.ID, "")
 				continue
 			}
 
@@ -222,6 +208,28 @@ func main() {
 				msgWait := tgbotapi.NewMessage(update.Message.Chat.ID, "Пожалуйста подождите...")
 				messageWait, _ := bot.Send(msgWait)
 				createProbCertificate(update, pfsenseClient, bot, messageWait.MessageID)
+			case "check_payment":
+				chatID := cq.Message.Chat.ID
+				paymentID, exists := yookassaClient.IsPaymentExist(chatID)
+				colorfulprint.PrintState("ljsdhflsgl;asj")
+				if !exists {
+					bot.Send(tgbotapi.NewMessage(chatID, "❌ Платеж не найден"))
+				} else {
+					payment, err := yookassaClient.GetYooKassaPaymentStatus(paymentID)
+					if err != nil {
+						bot.Send(tgbotapi.NewMessage(chatID, "❌ Ошибка проверки платежа"))
+					} else if payment.Status == "succeeded" {
+						// delete(userPayments, chatID)
+						yookassaClient.DeletePayment(chatID)
+						colorfulprint.PrintState("VSOP NORM")
+
+						handleSuccessfulPayment(bot, cq.Message, pfsenseClient)
+					} else {
+						bot.Send(tgbotapi.NewMessage(chatID, "⏳ Платеж еще не прошел"))
+					}
+				}
+				bot.Request(tgbotapi.NewCallback(cq.ID, ""))
+
 			}
 			bot.Request(tgbotapi.NewCallback(cq.ID, ""))
 		}
@@ -543,15 +551,15 @@ func handlePreCheckout(bot *tgbotapi.BotAPI, pcq *tgbotapi.PreCheckoutQuery) {
 }
 
 func handleSuccessfulPayment(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, pfsenseClient *pfsense.PfSenseClient) {
-	sp := msg.SuccessfulPayment
-	if sp == nil {
-		return
-	}
-	if sp.Currency != "XTR" && sp.Currency != "RUB" {
-		log.Printf("unexpected currency: %s", sp.Currency)
-		return
-	}
-	log.Printf("paid: %d XTR, payload=%s", sp.TotalAmount, sp.InvoicePayload)
+	// sp := msg.SuccessfulPayment
+	// if sp == nil {
+	// 	return
+	// }
+	// if sp.Currency != "XTR" && sp.Currency != "RUB" {
+	// 	log.Printf("unexpected currency: %s", sp.Currency)
+	// 	return
+	// }
+	// log.Printf("paid: %d XTR, payload=%s", sp.TotalAmount, sp.InvoicePayload)
 
 	messageWait, _ := bot.Send(tgbotapi.NewMessage(msg.Chat.ID, "Оплата получена. Отправляем VPN... ✅"))
 
