@@ -51,6 +51,8 @@ func canProceedKey(userID int64, key string, interval time.Duration) bool {
 
 func main() {
 	pfsenseApiKey := os.Getenv("PFSENSE_API_KEY")
+	// yookassaApiKey := os.Getenv("YOOKASSA_API_KEY")
+	// yookassaStoreID := os.Getenv("YOOKASSA_STORE_ID")
 	botToken := os.Getenv("TG_BOT_TOKEN")
 	tlsKey := os.Getenv("TLS_CRYPT_KEY")
 	invoiceToken = os.Getenv("INVOICE_TOKEN")
@@ -58,6 +60,7 @@ func main() {
 	tlsBytes, _ := os.ReadFile(tlsKey)
 
 	pfsenseClient := pfsense.New(pfsenseApiKey, []byte(tlsBytes))
+	// yookassaClient := yookassa.New(yookassaStoreID, yookassaApiKey)
 
 	bot, err := tgbotapi.NewBotAPI(botToken)
 	if err != nil {
@@ -83,39 +86,52 @@ func main() {
 				continue
 			}
 
+			// ДОБАВЬ ЭТУ ПРОВЕРКУ - если сообщение содержит ID платежа
+			// if strings.HasPrefix(update.Message.Text, "payment_") {
+			// 	paymentID := strings.TrimPrefix(update.Message.Text, "payment_")
+			// 	payment, err := yookassaClient.GetYooKassaPaymentStatus(paymentID)
+			// 	if err == nil && payment.Status == "succeeded" {
+			// 		// Платеж успешен, активируй услугу
+			// 		chatID := int64(payment.Metadata["chat_id"].(float64))
+			// 		product := payment.Metadata["product"].(string)
+			// 		msg := tgbotapi.NewMessage(chatID, fmt.Sprintf("ОПЛАТА ПРОШЛА УСПЕШНА ПРОДУКТ:%s", product))
+			// 		bot.Send(msg)
+			// 		handleSuccessfulPayment(bot, update.Message, pfsenseClient)
+			// 		// activateService(chatID, product, pfsenseClient, bot)
+			// 	}
+			// 	continue
+			// }
+
 			if update.Message.IsCommand() && update.Message.Command() == "start" {
 				sendStart(bot, update.Message.Chat.ID)
 				sendMenuKeyboard(bot, update.Message.Chat.ID)
 				continue
 			}
 
-			if update.Message.Command() == "renew" {
-				_, refId, err := pfsenseClient.GetAttachedCertRefIDByUserName(fmt.Sprint(update.Message.From.ID))
-				if err != nil {
-					colorfulprint.PrintError("ERROR RENEW", err)
-				}
-				pfsenseClient.RenewExistingCertificateByRefid(refId)
+			if update.Message.IsCommand() && update.Message.Command() == "pay" {
+				// yookassaClient.SendVPNPayment(bot, update.Message.Chat.ID, "")
+				continue
 			}
 
 			switch update.Message.Text {
 			case "🔑 Получить VPN":
 				OnGetVPNButton(bot, update, pfsenseClient)
-				sendMessageToAdmin(fmt.Sprintf("Юзер с id:%d нажал на кнопку Получить VPN...", update.Message.From.ID), update.Message.From.UserName, bot)
+				sendMessageToAdmin(fmt.Sprintf("Юзер с id:%d нажал на кнопку Получить VPN...", update.Message.From.ID), update.Message.From.UserName, bot, update.Message.From.ID)
 				continue
 
 			case "📖 Инструкция":
 				instruct.SendInstructMenu(bot, update.Message.Chat.ID)
-				sendMessageToAdmin(fmt.Sprintf("Юзер с id:%d нажал на кнопку Инструкции...", update.Message.From.ID), update.Message.From.UserName, bot)
+				sendMessageToAdmin(fmt.Sprintf("Юзер с id:%d нажал на кнопку Инструкции...", update.Message.From.ID), update.Message.From.UserName, bot, update.Message.From.ID)
 				continue
 
-			case "📊 Проверить статус":
+			case "📊 Статус":
 				if !canProceedKey(update.Message.From.ID, "check_status", 3*time.Second) {
 					bot.Send(tgbotapi.NewMessage(update.Message.Chat.ID, "⏳ Чуть позже, подождите пару секунд"))
 					break
 				}
 				checkStatus(pfsenseClient, update, bot)
 
-				sendMessageToAdmin(fmt.Sprintf("Юзер с id:%d нажал на кнопку Проверки статуса...", update.Message.From.ID), update.Message.From.UserName, bot)
+				sendMessageToAdmin(fmt.Sprintf("Юзер с id:%d нажал на кнопку Проверки статуса...", update.Message.From.ID), update.Message.From.UserName, bot, update.Message.From.ID)
 
 				continue
 
@@ -123,7 +139,7 @@ func main() {
 				supportText := `🛠️ <b>Техническая поддержка</b>
 
 Если у вас возникли проблемы:
-• 🔧 Телеграм: https://t.me/happycatvpn
+• Телеграм: @happycatvpn
 
 ⏰ <i>Время ответа: до 24 часов</i>`
 
@@ -131,7 +147,7 @@ func main() {
 				msg.ParseMode = "HTML"
 				bot.Send(msg)
 
-				sendMessageToAdmin(fmt.Sprintf("Юзер с id:%d нажал на кнопку Поддержки...", update.Message.From.ID), update.Message.From.UserName, bot)
+				sendMessageToAdmin(fmt.Sprintf("Юзер с id:%d нажал на кнопку Поддержки...", update.Message.From.ID), update.Message.From.UserName, bot, update.Message.From.ID)
 
 				continue
 
@@ -146,13 +162,16 @@ func main() {
 				}
 
 				createProbCertificate(update, pfsenseClient, bot, messageWait.MessageID)
-				sendMessageToAdmin(fmt.Sprintf("Юзер с id:%d нажал на кнопку Пробного доступа...", update.Message.From.ID), update.Message.From.UserName, bot)
+				sendMessageToAdmin(fmt.Sprintf("Юзер с id:%d нажал на кнопку Пробного доступа...", update.Message.From.ID), update.Message.From.UserName, bot, update.Message.From.ID)
 
 				continue
 
 			}
 
 			sendMenuKeyboard(bot, update.Message.Chat.ID)
+
+			delete := tgbotapi.NewDeleteMessage(update.Message.Chat.ID, update.Message.MessageID)
+			bot.Send(delete)
 		}
 
 		if cq := update.CallbackQuery; cq != nil && cq.Message != nil {
@@ -250,8 +269,10 @@ func OnGetVPNButton(bot *tgbotapi.BotAPI, update tgbotapi.Update, pfsenseClient 
 	return colorfulprint.PrintError("ReturnError", nil)
 }
 
-func sendMessageToAdmin(text string, username string, bot *tgbotapi.BotAPI) {
-
+func sendMessageToAdmin(text string, username string, bot *tgbotapi.BotAPI, id int64) {
+	if id == 623290294 {
+		return
+	}
 	newText := fmt.Sprintf("@%s:\n%s", username, text)
 	msg := tgbotapi.NewMessage(623290294, newText)
 	bot.Send(msg)
@@ -274,23 +295,23 @@ func checkStatus(pfsenseClient *pfsense.PfSenseClient, update tgbotapi.Update, b
 		colorfulprint.PrintError(fmt.Sprintf("Couldnt get date of certificate{%s}\n", certId), err)
 	}
 
-	var statusIcon, statusText string
+	var text string
+
 	if expired {
-		statusIcon = "❌"
-		statusText = "Истекла"
+		text = `📊 <b>Статус вашей подписки</b>
+
+❌ <b>Статус:</b> Неактивна`
+
 	} else {
-		statusIcon = "✅"
-		statusText = "Активна"
-	}
+		text = fmt.Sprintf(`📊 <b>Статус вашей подписки</b>
 
-	text := fmt.Sprintf(`📊 <b>Статус вашей подписки</b>
-
-%s <b>Статус:</b> %s
+✅ <b>Статус:</b> Активна
 📅 <b>Начало:</b> %s
 ⏰ <b>Окончание:</b> %s
 —————————————————
 💡 Осталось: %d дней`,
-		statusIcon, statusText, from, until, daysLeft)
+			from, until, daysLeft)
+	}
 
 	msg := tgbotapi.NewMessage(update.Message.Chat.ID, text)
 	msg.ParseMode = "HTML"
@@ -303,7 +324,7 @@ func menuKeyboard() tgbotapi.ReplyKeyboardMarkup {
 		tgbotapi.NewKeyboardButtonRow(
 			tgbotapi.NewKeyboardButton("🔑 Получить VPN"),
 			tgbotapi.NewKeyboardButton("🆓 Пробный доступ"),
-			tgbotapi.NewKeyboardButton("📊 Проверить статус"),
+			tgbotapi.NewKeyboardButton("📊 Статус"),
 		),
 		tgbotapi.NewKeyboardButtonRow(
 			tgbotapi.NewKeyboardButton("📖 Инструкция"),
@@ -459,7 +480,7 @@ func sendStarsInvoice(bot *tgbotapi.BotAPI, chatID int64, amountStars int) error
 
 	inv := tgbotapi.NewInvoice(
 		chatID,
-		"🔐 Premium VPN доступ",
+		"🔐 Чтобы получить VPN оплатите подписку!",
 		"С подпиской вы получаете:\n🎯 Полный доступ ко всем серверу\n⚡ Максимальная скорость\n📞 Круглосуточная поддержка\n♾️ Любое количество устройств\n🔄 Легкое продление",
 		payload,
 		invoiceTokenTest,
@@ -534,13 +555,9 @@ func handleSuccessfulPayment(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, pfsens
 
 	messageWait, _ := bot.Send(tgbotapi.NewMessage(msg.Chat.ID, "Оплата получена. Отправляем VPN... ✅"))
 
-	// 👉 здесь выдай доступ: заведи user в pfSense / активируй подписку / пр.
-	// ... твоя логика ...
 	createUserAndSendCertificate(tgbotapi.Update{Message: msg}, pfsenseClient, bot, messageWait.MessageID)
 
-	// Подтверждение пользователю
-
-	sendMessageToAdmin(fmt.Sprintf("Юзер с id:%d оплатил подписку на VPN!", msg.From.ID), msg.From.UserName, bot)
+	sendMessageToAdmin(fmt.Sprintf("Юзер с id:%d оплатил подписку на VPN!", msg.From.ID), msg.From.UserName, bot, msg.From.ID)
 }
 
 func sendCertificate(certRefID, telegramUserid, certDateUntil string, isProb bool, update tgbotapi.Update, pfsenseClient *pfsense.PfSenseClient, bot *tgbotapi.BotAPI, messageIDtoEdit int) {
@@ -610,4 +627,7 @@ func sendMenuKeyboard(bot *tgbotapi.BotAPI, chatID int64) {
 	msg.ReplyMarkup = menuKeyboard()
 
 	bot.Send(msg)
+
+	// delete := tgbotapi.NewDeleteMessage(chatID, message.MessageID)
+	// bot.Send(delete)
 }
