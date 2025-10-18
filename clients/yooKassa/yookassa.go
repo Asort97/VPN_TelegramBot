@@ -8,6 +8,8 @@ import (
 	"io/ioutil"
 	"net/http"
 	"time"
+
+	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 	// tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 	// tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 	// tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
@@ -49,6 +51,8 @@ type ReceiptItem struct {
 	PaymentSubject string `json:"payment_subject"`
 }
 
+var userPayments = make(map[int64]string) // chatID -> paymentID
+
 type YooKassaPaymentResponse struct {
 	ID           string                 `json:"id"`
 	Status       string                 `json:"status"`
@@ -82,7 +86,7 @@ func (y *YooKassaClient) CreateYooKassaPayment(amount float64, description strin
 	// ПРАВИЛЬНОЕ подтверждение по документации
 	paymentReq.Confirmation = map[string]interface{}{
 		"type":       "redirect",
-		"return_url": "https://t.me/your_bot", // URL для возврата после оплаты
+		"return_url": "https://t.me/happyCatVpnBot", // URL для возврата после оплаты
 	}
 
 	paymentReq.Description = description
@@ -91,7 +95,7 @@ func (y *YooKassaClient) CreateYooKassaPayment(amount float64, description strin
 	paymentReq.Metadata = map[string]interface{}{
 		"chat_id":  chatID,
 		"product":  product,
-		"order_id": fmt.Sprintf("order_%d_%d", chatID, time.Now().Unix()),
+		"order_id": fmt.Sprintf("order_%d", chatID),
 	}
 
 	// Добавляем чек для 54-ФЗ (если нужен)
@@ -196,51 +200,66 @@ func (y *YooKassaClient) GetYooKassaPaymentStatus(paymentID string) (*YooKassaPa
 }
 
 // // Отправка сообщения с кнопкой оплаты
-// func (y *YooKassaClient) sendYooKassaPaymentButton(bot *tgbotapi.BotAPI, chatID int64, amount float64, productName string, userEmail string) error {
-// 	payment, err := y.CreateYooKassaPayment(
-// 		amount,
-// 		productName,
-// 		chatID,
-// 		productName,
-// 		userEmail,
-// 	)
-// 	if err != nil {
-// 		return fmt.Errorf("ошибка создания платежа: %v", err)
-// 	}
+func (y *YooKassaClient) sendYooKassaPaymentButton(bot *tgbotapi.BotAPI, chatID int64, amount float64, productName string, userEmail string) error {
+	payment, err := y.CreateYooKassaPayment(
+		amount,
+		productName,
+		chatID,
+		productName,
+		userEmail,
+	)
+	if err != nil {
+		return fmt.Errorf("ошибка создания платежа: %v", err)
+	}
 
-// 	// Извлекаем URL для оплаты из confirmation
-// 	confirmationURL := ""
-// 	if confirmation, ok := payment.Confirmation["confirmation_url"].(string); ok {
-// 		confirmationURL = confirmation
-// 	} else {
-// 		return fmt.Errorf("не удалось получить URL для оплаты")
-// 	}
+	userPayments[chatID] = payment.ID
 
-// 	message := fmt.Sprintf(`💎 *%s*
+	// Извлекаем URL для оплаты из confirmation
+	confirmationURL := ""
+	if confirmation, ok := payment.Confirmation["confirmation_url"].(string); ok {
+		confirmationURL = confirmation
+	} else {
+		return fmt.Errorf("не удалось получить URL для оплаты")
+	}
 
-// 💰 Сумма к оплате: *%.2f руб.*
-// 📝 Описание: %s
+	message := fmt.Sprintf(`💎 *%s*
 
-// Нажмите кнопку ниже для перехода к оплате:`,
-// 		productName, amount, productName)
+💰 Сумма к оплате: *%.2f руб.*
+📝 Описание: %s
 
-// 	msg := tgbotapi.NewMessage(chatID, message)
-// 	msg.ParseMode = "Markdown"
+Нажмите кнопку ниже для перехода к оплате:`,
+		productName, amount, productName)
 
-// 	// Создаем кнопку со ссылкой на страницу оплаты Юкассы
-// 	keyboard := tgbotapi.NewInlineKeyboardMarkup(
-// 		tgbotapi.NewInlineKeyboardRow(
-// 			tgbotapi.NewInlineKeyboardButtonURL("💳 Оплатить", confirmationURL),
-// 		),
-// 	)
-// 	msg.ReplyMarkup = keyboard
+	msg := tgbotapi.NewMessage(chatID, message)
+	msg.ParseMode = "Markdown"
 
-// 	_, err = bot.Send(msg)
-// 	return err
-// }
+	// Создаем кнопку со ссылкой на страницу оплаты Юкассы
+	keyboard := tgbotapi.NewInlineKeyboardMarkup(
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonURL("💳 Оплатить", confirmationURL),
+		),
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("✅ Я оплатил", "check_payment"),
+		),
+	)
+	msg.ReplyMarkup = keyboard
 
-// // Для VPN услуги
-// func (y *YooKassaClient) SendVPNPayment(bot *tgbotapi.BotAPI, chatID int64, userEmail string) error {
-// 	return y.sendYooKassaPaymentButton(bot, chatID, 1.00,
-// 		"VPN Premium - доступ на 30 дней", userEmail)
-// }
+	_, err = bot.Send(msg)
+	return err
+}
+
+// Для VPN услуги
+func (y *YooKassaClient) SendVPNPayment(bot *tgbotapi.BotAPI, chatID int64, userEmail string) error {
+	return y.sendYooKassaPaymentButton(bot, chatID, 1.00,
+		"VPN Premium - доступ на 30 дней", userEmail)
+}
+
+func (y *YooKassaClient) IsPaymentExist(chatID int64) (string, bool) {
+	paymentID, exists := userPayments[chatID]
+
+	return paymentID, exists
+}
+
+func (y *YooKassaClient) DeletePayment(chatID int64) {
+	delete(userPayments, chatID)
+}
