@@ -35,6 +35,7 @@ const vpnCost int = 100
 
 var invoiceToken string
 var invoiceTokenTest string
+var yookassaClient *yookassa.YooKassaClient
 
 func canProceedKey(userID int64, key string, interval time.Duration) bool {
 	now := time.Now()
@@ -61,7 +62,7 @@ func main() {
 	tlsBytes, _ := os.ReadFile(tlsKey)
 
 	pfsenseClient := pfsense.New(pfsenseApiKey, []byte(tlsBytes))
-	yookassaClient := yookassa.New(yookassaStoreID, yookassaApiKey)
+	yookassaClient = yookassa.New(yookassaStoreID, yookassaApiKey)
 
 	bot, err := tgbotapi.NewBotAPI(botToken)
 	if err != nil {
@@ -222,13 +223,17 @@ func main() {
 						// delete(userPayments, chatID)
 						yookassaClient.DeletePayment(chatID)
 						colorfulprint.PrintState("VSOP NORM")
-
-						handleSuccessfulPayment(bot, cq.Message, pfsenseClient)
+						// соберём фейковое сообщение с правильным From (пользователь) и Chat
+						fake := &tgbotapi.Message{
+							Chat: &tgbotapi.Chat{ID: chatID},
+							From: cq.From,
+						}
+						handleSuccessfulPayment(bot, fake, pfsenseClient)
 					} else {
 						bot.Send(tgbotapi.NewMessage(chatID, "⏳ Платеж еще не прошел"))
 					}
 				}
-				bot.Request(tgbotapi.NewCallback(cq.ID, ""))
+				// bot.Request(tgbotapi.NewCallback(cq.ID, ""))
 
 			}
 			bot.Request(tgbotapi.NewCallback(cq.ID, ""))
@@ -261,7 +266,8 @@ func OnGetVPNButton(bot *tgbotapi.BotAPI, update tgbotapi.Update, pfsenseClient 
 				msg := tgbotapi.NewEditMessageText(update.Message.Chat.ID, messageWait.MessageID, "Ваша подписка истекла! Чтобы получить VPN пожалуйста обновите подписку!")
 				bot.Send(msg)
 
-				_ = sendStarsInvoice(bot, update.Message.Chat.ID, vpnCost)
+				yookassaClient.SendVPNPayment(bot, update.Message.Chat.ID, "")
+				// _ = sendStarsInvoice(bot, update.Message.Chat.ID, vpnCost)
 			} else {
 				_, certDateUntil, _, _, _ := pfsenseClient.GetDateOfCertificate(certID)
 
@@ -272,7 +278,8 @@ func OnGetVPNButton(bot *tgbotapi.BotAPI, update tgbotapi.Update, pfsenseClient 
 		msg := tgbotapi.NewEditMessageText(update.Message.Chat.ID, messageWait.MessageID, "Чтобы получить VPN оплатите подписку!")
 		bot.Send(msg)
 
-		_ = sendStarsInvoice(bot, update.Message.Chat.ID, vpnCost)
+		yookassaClient.SendVPNPayment(bot, update.Message.Chat.ID, "")
+		// _ = sendStarsInvoice(bot, update.Message.Chat.ID, vpnCost)
 	}
 	return colorfulprint.PrintError("ReturnError", nil)
 }
@@ -551,18 +558,9 @@ func handlePreCheckout(bot *tgbotapi.BotAPI, pcq *tgbotapi.PreCheckoutQuery) {
 }
 
 func handleSuccessfulPayment(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, pfsenseClient *pfsense.PfSenseClient) {
-	// sp := msg.SuccessfulPayment
-	// if sp == nil {
-	// 	return
-	// }
-	// if sp.Currency != "XTR" && sp.Currency != "RUB" {
-	// 	log.Printf("unexpected currency: %s", sp.Currency)
-	// 	return
-	// }
-	// log.Printf("paid: %d XTR, payload=%s", sp.TotalAmount, sp.InvoicePayload)
-
 	messageWait, _ := bot.Send(tgbotapi.NewMessage(msg.Chat.ID, "Оплата получена. Отправляем VPN... ✅"))
 
+	colorfulprint.PrintState(msg.From.FirstName)
 	createUserAndSendCertificate(tgbotapi.Update{Message: msg}, pfsenseClient, bot, messageWait.MessageID)
 
 	sendMessageToAdmin(fmt.Sprintf("Юзер с id:%d оплатил подписку на VPN!", msg.From.ID), msg.From.UserName, bot, msg.From.ID)
