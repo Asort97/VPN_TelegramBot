@@ -78,27 +78,27 @@ func New(shopID, apiKey string) *YooKassaClient {
 func (y *YooKassaClient) CreateYooKassaPayment(amount float64, description string, chatID int64, product string, userEmail string) (*YooKassaPaymentResponse, error) {
 	paymentReq := YooKassaPaymentRequest{}
 
-	// Форматируем сумму (обязательно в формате "299.00")
+	// Сумма и валюта (например "299.00")
 	paymentReq.Amount.Value = fmt.Sprintf("%.2f", amount)
 	paymentReq.Amount.Currency = "RUB"
 	paymentReq.Capture = true
 
-	// ПРАВИЛЬНОЕ подтверждение по документации
+	// Настраиваем редирект после оплаты
 	paymentReq.Confirmation = map[string]interface{}{
 		"type":       "redirect",
-		"return_url": "https://t.me/happyCatVpnBot", // URL для возврата после оплаты
+		"return_url": "https://t.me/happyCatVpnBot",
 	}
 
 	paymentReq.Description = description
 
-	// Метаданные должны быть map[string]interface{}
+	// Дополнительные данные заказа
 	paymentReq.Metadata = map[string]interface{}{
 		"chat_id":  chatID,
 		"product":  product,
 		"order_id": fmt.Sprintf("order_%d", chatID),
 	}
 
-	// Добавляем чек для 54-ФЗ (если нужен)
+	// Данные для чека 54-ФЗ (если указан email)
 	if userEmail != "" {
 		paymentReq.Receipt = &Receipt{
 			Customer: struct {
@@ -115,7 +115,7 @@ func (y *YooKassaClient) CreateYooKassaPayment(amount float64, description strin
 						Value:    fmt.Sprintf("%.2f", amount),
 						Currency: "RUB",
 					},
-					VatCode:        1, // НДС 20%
+					VatCode:        1,
 					PaymentMode:    "full_payment",
 					PaymentSubject: "service",
 				},
@@ -125,7 +125,7 @@ func (y *YooKassaClient) CreateYooKassaPayment(amount float64, description strin
 
 	jsonData, err := json.Marshal(paymentReq)
 	if err != nil {
-		return nil, fmt.Errorf("ошибка маршалинга: %v", err)
+		return nil, fmt.Errorf("не удалось подготовить тело запроса: %v", err)
 	}
 
 	client := &http.Client{Timeout: 30 * time.Second}
@@ -133,10 +133,9 @@ func (y *YooKassaClient) CreateYooKassaPayment(amount float64, description strin
 		"https://api.yookassa.ru/v3/payments",
 		bytes.NewBuffer(jsonData))
 	if err != nil {
-		return nil, fmt.Errorf("ошибка создания запроса: %v", err)
+		return nil, fmt.Errorf("не удалось создать запрос к YooKassa: %v", err)
 	}
 
-	// Basic Auth для Юкассы
 	auth := fmt.Sprintf("%s:%s", y.yookassaShopID, y.yookassaSecretKey)
 	req.Header.Set("Authorization", "Basic "+base64.StdEncoding.EncodeToString([]byte(auth)))
 	req.Header.Set("Content-Type", "application/json")
@@ -144,23 +143,22 @@ func (y *YooKassaClient) CreateYooKassaPayment(amount float64, description strin
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("ошибка выполнения запроса: %v", err)
+		return nil, fmt.Errorf("не удалось выполнить запрос к YooKassa: %v", err)
 	}
 	defer resp.Body.Close()
 
 	body, err := ioutil.ReadAll(resp.Body)
 	if err != nil {
-		return nil, fmt.Errorf("ошибка чтения ответа: %v", err)
+		return nil, fmt.Errorf("не удалось прочитать ответ YooKassa: %v", err)
 	}
 
 	if resp.StatusCode != 200 {
-		return nil, fmt.Errorf("ошибка API Юкассы: %s, тело: %s", resp.Status, string(body))
+		return nil, fmt.Errorf("ошибка API YooKassa: %s, ответ: %s", resp.Status, string(body))
 	}
 
 	var paymentResp YooKassaPaymentResponse
-	err = json.Unmarshal(body, &paymentResp)
-	if err != nil {
-		return nil, fmt.Errorf("ошибка парсинга ответа: %v", err)
+	if err := json.Unmarshal(body, &paymentResp); err != nil {
+		return nil, fmt.Errorf("не удалось разобрать ответ YooKassa: %v", err)
 	}
 
 	return &paymentResp, nil
@@ -200,7 +198,7 @@ func (y *YooKassaClient) GetYooKassaPaymentStatus(paymentID string) (*YooKassaPa
 }
 
 // // Отправка сообщения с кнопкой оплаты
-func (y *YooKassaClient) sendYooKassaPaymentButton(bot *tgbotapi.BotAPI, chatID int64, amount float64, productName string, userEmail string) error {
+func (y *YooKassaClient) sendYooKassaPaymentButton(bot *tgbotapi.BotAPI, chatID int64, messageID int, amount float64, productName string, userEmail string) (int, bool, error) {
 	payment, err := y.CreateYooKassaPayment(
 		amount,
 		productName,
@@ -209,31 +207,26 @@ func (y *YooKassaClient) sendYooKassaPaymentButton(bot *tgbotapi.BotAPI, chatID 
 		userEmail,
 	)
 	if err != nil {
-		return fmt.Errorf("ошибка создания платежа: %v", err)
+		return messageID, false, fmt.Errorf("не удалось создать платёж: %v", err)
 	}
 
 	userPayments[chatID] = payment.ID
 
-	// Извлекаем URL для оплаты из confirmation
 	confirmationURL := ""
 	if confirmation, ok := payment.Confirmation["confirmation_url"].(string); ok {
 		confirmationURL = confirmation
 	} else {
-		return fmt.Errorf("не удалось получить URL для оплаты")
+		return messageID, false, fmt.Errorf("не получена ссылка на оплату от YooKassa")
 	}
 
-	message := fmt.Sprintf(`💎 *%s*
+	message := fmt.Sprintf(`💳 *%s*
 
-💰 Сумма к оплате: *%.2f руб.*
+💰 Сумма к оплате: *%.2f ₽*
 📝 Описание: %s
 
-Нажмите кнопку ниже для перехода к оплате:`,
+Нажмите «Оплатить», чтобы продолжить.`,
 		productName, amount, productName)
 
-	msg := tgbotapi.NewMessage(chatID, message)
-	msg.ParseMode = "Markdown"
-
-	// Создаем кнопку со ссылкой на страницу оплаты Юкассы
 	keyboard := tgbotapi.NewInlineKeyboardMarkup(
 		tgbotapi.NewInlineKeyboardRow(
 			tgbotapi.NewInlineKeyboardButtonURL("💳 Оплатить", confirmationURL),
@@ -241,17 +234,35 @@ func (y *YooKassaClient) sendYooKassaPaymentButton(bot *tgbotapi.BotAPI, chatID 
 		tgbotapi.NewInlineKeyboardRow(
 			tgbotapi.NewInlineKeyboardButtonData("✅ Я оплатил", "check_payment"),
 		),
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("⬅️ Назад в меню", "nav_menu"),
+		),
 	)
+
+	if messageID > 0 {
+		edit := tgbotapi.NewEditMessageTextAndMarkup(chatID, messageID, message, keyboard)
+		edit.ParseMode = "Markdown"
+		if _, err := bot.Send(edit); err == nil {
+			return messageID, false, nil
+		}
+	}
+
+	msg := tgbotapi.NewMessage(chatID, message)
+	msg.ParseMode = "Markdown"
 	msg.ReplyMarkup = keyboard
 
-	_, err = bot.Send(msg)
-	return err
+	sent, err := bot.Send(msg)
+	if err != nil {
+		return messageID, false, err
+	}
+
+	return sent.MessageID, true, nil
 }
 
 // Для VPN услуги
-func (y *YooKassaClient) SendVPNPayment(bot *tgbotapi.BotAPI, chatID int64, userEmail string) error {
-	return y.sendYooKassaPaymentButton(bot, chatID, 1.00,
-		"VPN Premium - доступ на 30 дней", userEmail)
+func (y *YooKassaClient) SendVPNPayment(bot *tgbotapi.BotAPI, chatID int64, messageID int, userEmail string) (int, bool, error) {
+	return y.sendYooKassaPaymentButton(bot, chatID, messageID, 1.00,
+		"VPN Premium — доступ на 30 дней", userEmail)
 }
 
 func (y *YooKassaClient) IsPaymentExist(chatID int64) (string, bool) {

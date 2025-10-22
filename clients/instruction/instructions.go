@@ -90,6 +90,10 @@ func InstructionWindows(chatID int64, bot *tgbotapi.BotAPI, step int) {
 		rows = append(rows, linkRow)
 	}
 
+	rows = append(rows, tgbotapi.NewInlineKeyboardRow(
+		tgbotapi.NewInlineKeyboardButtonData("❌ Выйти", "nav_instructions"),
+	))
+
 	kb := tgbotapi.NewInlineKeyboardMarkup(rows...)
 
 	// Если есть предыдущее сообщение — редактируем его медиа
@@ -177,6 +181,10 @@ func InstructionAndroid(chatID int64, bot *tgbotapi.BotAPI, step int) {
 
 		rows = append(rows, linkRow)
 	}
+
+	rows = append(rows, tgbotapi.NewInlineKeyboardRow(
+		tgbotapi.NewInlineKeyboardButtonData("❌ Выйти", "nav_instructions"),
+	))
 
 	kb := tgbotapi.NewInlineKeyboardMarkup(rows...)
 
@@ -269,6 +277,10 @@ func InstructionIos(chatID int64, bot *tgbotapi.BotAPI, step int) {
 		rows = append(rows, linkRow)
 	}
 
+	rows = append(rows, tgbotapi.NewInlineKeyboardRow(
+		tgbotapi.NewInlineKeyboardButtonData("❌ Выйти", "nav_instructions"),
+	))
+
 	kb := tgbotapi.NewInlineKeyboardMarkup(rows...)
 
 	// Если есть сообщение — редактируем
@@ -321,18 +333,24 @@ func InstructionIos(chatID int64, bot *tgbotapi.BotAPI, step int) {
 	iosStates[chatID] = &InstructionState{CurrentStep: step, MessageID: sent.MessageID, ChatID: chatID}
 }
 
-func SendInstructMenu(bot *tgbotapi.BotAPI, chatID int64) {
-	buttons := tgbotapi.NewInlineKeyboardMarkup(
-		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("🪟 Windows", "windows"),
-			tgbotapi.NewInlineKeyboardButtonData("📱 Android", "android"),
-		),
-		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("🍎 IOS", "ios"),
-		),
-	)
-
-	msg := tgbotapi.NewMessage(chatID, "Инструкция:")
-	msg.ReplyMarkup = buttons
-	bot.Send(msg)
+func ResetState(chatID int64) {
+	delete(windowsStates, chatID)
+	delete(androidStates, chatID)
+	delete(iosStates, chatID)
 }
+
+// func SendInstructMenu(bot *tgbotapi.BotAPI, chatID int64) {
+// 	buttons := tgbotapi.NewInlineKeyboardMarkup(
+// 		tgbotapi.NewInlineKeyboardRow(
+// 			tgbotapi.NewInlineKeyboardButtonData("🪟 Windows", "windows"),
+// 			tgbotapi.NewInlineKeyboardButtonData("📱 Android", "android"),
+// 		),
+// 		tgbotapi.NewInlineKeyboardRow(
+// 			tgbotapi.NewInlineKeyboardButtonData("🍎 IOS", "ios"),
+// 		),
+// 	)
+
+// 	msg := tgbotapi.NewMessage(chatID, "Инструкция:")
+// 	msg.ReplyMarkup = buttons
+// 	bot.Send(msg)
+// }
