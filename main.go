@@ -29,8 +29,6 @@ const startText = `
 
 var lastActionKey = make(map[int64]map[string]time.Time)
 
-const vpnCost int = 100
-
 var invoiceToken string
 var invoiceTokenTest string
 var yookassaClient *yookassa.YooKassaClient
@@ -44,7 +42,32 @@ const (
 	stateStatus       SessionState = "status"
 	stateSupport      SessionState = "support"
 	stateInstructions SessionState = "instructions"
+	stateChooseRate   SessionState = "choose_rate"
 )
+
+// RatePlan описывает тариф, который пользователь может выбрать.
+type RatePlan struct {
+	ID          string
+	Title       string
+	Amount      float64
+	Description string
+}
+
+// ratePlans содержит список доступных тарифов. При необходимости поменяйте названия и цены.
+var ratePlans = []RatePlan{
+	{ID: "7d", Title: "7 дней", Amount: 199, Description: "Подходит, чтобы попробовать сервис или уехать на короткий срок."},
+	{ID: "30d", Title: "30 дней", Amount: 699, Description: "Оптимальный вариант для постоянного доступа без ограничений."},
+	{ID: "180d", Title: "6 месяцев", Amount: 3499, Description: "Экономия по сравнению с помесячной оплатой и минимум хлопот."},
+	{ID: "365d", Title: "12 месяцев", Amount: 5999, Description: "Максимальная выгода для тех, кто всегда онлайн."},
+}
+
+var ratePlanByID = func() map[string]RatePlan {
+	result := make(map[string]RatePlan)
+	for _, plan := range ratePlans {
+		result[plan.ID] = plan
+	}
+	return result
+}()
 
 type UserSession struct {
 	MessageID   int
@@ -178,6 +201,34 @@ func singleBackKeyboard(target string) tgbotapi.InlineKeyboardMarkup {
 	)
 }
 
+func rateSelectionKeyboard() tgbotapi.InlineKeyboardMarkup {
+	var rows [][]tgbotapi.InlineKeyboardButton
+	for _, plan := range ratePlans {
+		label := fmt.Sprintf("%s — %.0f ₽", plan.Title, plan.Amount)
+		rows = append(rows, tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData(label, "rate_"+plan.ID),
+		))
+	}
+	rows = append(rows, tgbotapi.NewInlineKeyboardRow(
+		tgbotapi.NewInlineKeyboardButtonData("⬅️ Назад в меню", "nav_menu"),
+	))
+	return tgbotapi.NewInlineKeyboardMarkup(rows...)
+}
+
+func showRateSelection(bot *tgbotapi.BotAPI, chatID int64, session *UserSession, intro string) error {
+	var parts []string
+	if strings.TrimSpace(intro) != "" {
+		parts = append(parts, intro)
+	}
+	parts = append(parts, "<b>Доступные тарифы:</b>")
+	for _, plan := range ratePlans {
+		planText := fmt.Sprintf("• <b>%s</b> — %.0f ₽\n%s", plan.Title, plan.Amount, plan.Description)
+		parts = append(parts, planText)
+	}
+	message := strings.Join(parts, "\n\n")
+	return updateSessionText(bot, chatID, session, stateChooseRate, message, "HTML", rateSelectionKeyboard())
+}
+
 func ackCallback(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, text string) {
 	cfg := tgbotapi.CallbackConfig{CallbackQueryID: cq.ID}
 	if text != "" {
@@ -263,6 +314,7 @@ func handleCallback(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, pfsenseCli
 	chatID := cq.Message.Chat.ID
 	session := getSession(chatID)
 	data := cq.Data
+	ackText := ""
 
 	switch {
 	case data == "nav_menu":
@@ -305,11 +357,19 @@ func handleCallback(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, pfsenseCli
 		instruct.InstructionIos(chatID, bot, step+1)
 	case data == "check_payment":
 		handleCheckPayment(bot, cq, session, pfsenseClient)
+	case strings.HasPrefix(data, "rate_"):
+		planID := strings.TrimPrefix(data, "rate_")
+		if plan, ok := ratePlanByID[planID]; ok {
+			handleRateSelection(bot, cq, session, plan)
+			ackText = fmt.Sprintf("Тариф «%s» выбран", plan.Title)
+		} else {
+			ackText = "Неизвестный тариф"
+		}
 	default:
 		// ignore
 	}
 
-	ackCallback(bot, cq, "")
+	ackCallback(bot, cq, ackText)
 }
 
 func showMainMenu(bot *tgbotapi.BotAPI, chatID int64, session *UserSession) error {
@@ -339,9 +399,10 @@ func handleGetVPN(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, session *Use
 			_ = updateSessionText(bot, chatID, session, stateGetVPN, "Не получилось проверить подписку. Попробуйте ещё раз позже.", "", singleBackKeyboard("nav_menu"))
 		}
 	} else {
-		if err := offerVpnPayment(bot, chatID, session); err != nil {
-			log.Printf("offerVpnPayment error: %v", err)
-			_ = updateSessionText(bot, chatID, session, stateGetVPN, "Не удалось подготовить платёж. Попробуйте позже.", "", singleBackKeyboard("nav_menu"))
+		intro := "Сертификат для вашего аккаунта не найден. Выберите тариф, чтобы оформить подписку."
+		if err := showRateSelection(bot, chatID, session, intro); err != nil {
+			log.Printf("showRateSelection error: %v", err)
+			_ = updateSessionText(bot, chatID, session, stateGetVPN, "Не удалось показать тарифы. Попробуйте позже.", "", singleBackKeyboard("nav_menu"))
 		}
 	}
 
@@ -365,30 +426,11 @@ func processExistingUser(bot *tgbotapi.BotAPI, chatID int64, session *UserSessio
 	}
 
 	if expired {
-		info := "Срок действия сертификата истёк. Оформите продление, чтобы продолжить пользоваться VPN."
-		if err := updateSessionText(bot, chatID, session, stateGetVPN, info, "HTML", singleBackKeyboard("nav_menu")); err != nil {
-			log.Printf("updateSessionText error: %v", err)
-		}
-		return offerVpnPayment(bot, chatID, session)
+		intro := "Срок действия подписки закончился. Выберите тариф, чтобы продлить доступ."
+		return showRateSelection(bot, chatID, session, intro)
 	}
 
 	return sendCertificate(certRefID, telegramUser, certDateUntil, false, chatID, userID, pfsenseClient, bot, session)
-}
-
-func offerVpnPayment(bot *tgbotapi.BotAPI, chatID int64, session *UserSession) error {
-	oldID := session.MessageID
-	newID, replaced, err := yookassaClient.SendVPNPayment(bot, chatID, session.MessageID, "")
-	if err != nil {
-		return err
-	}
-	if replaced && oldID != 0 {
-		_, _ = bot.Send(tgbotapi.NewDeleteMessage(chatID, oldID))
-	}
-	session.MessageID = newID
-	session.State = stateGetVPN
-	session.ContentType = "text"
-	instruct.ResetState(chatID)
-	return nil
 }
 
 func handleTrial(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, session *UserSession, pfsenseClient *pfsense.PfSenseClient) {
@@ -505,6 +547,36 @@ func handleInstructionsMenu(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, se
 	}
 }
 
+func handleRateSelection(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, session *UserSession, plan RatePlan) {
+	chatID := cq.Message.Chat.ID
+
+	waiting := fmt.Sprintf("⏳ Подготавливаем оплату тарифа <b>%s</b>...", plan.Title)
+	if err := updateSessionText(bot, chatID, session, stateGetVPN, waiting, "HTML", singleBackKeyboard("nav_menu")); err != nil {
+		log.Printf("updateSessionText error: %v", err)
+	}
+
+	if err := startPaymentForPlan(bot, chatID, session, plan); err != nil {
+		log.Printf("startPaymentForPlan error: %v", err)
+		_ = updateSessionText(bot, chatID, session, stateGetVPN, "Не удалось подготовить оплату. Попробуйте позже.", "", singleBackKeyboard("nav_menu"))
+	}
+}
+
+func startPaymentForPlan(bot *tgbotapi.BotAPI, chatID int64, session *UserSession, plan RatePlan) error {
+	oldID := session.MessageID
+	newID, replaced, err := yookassaClient.SendVPNPayment(bot, chatID, session.MessageID, plan.Amount, plan.Title, "")
+	if err != nil {
+		return err
+	}
+	if replaced && oldID != 0 && oldID != newID {
+		_, _ = bot.Send(tgbotapi.NewDeleteMessage(chatID, oldID))
+	}
+	session.MessageID = newID
+	session.State = stateGetVPN
+	session.ContentType = "text"
+	instruct.ResetState(chatID)
+	return nil
+}
+
 func handleInstructionSelection(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, session *UserSession, t instruct.InstructType) {
 	chatID := cq.Message.Chat.ID
 	instruct.SetInstructKeyboard(session.MessageID, chatID, t)
@@ -530,7 +602,13 @@ func handleCheckPayment(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, sessio
 		return
 	}
 
+	fmt.Printf("GET STATUS PAYMENT %s", paymentID)
+
 	payment, err := yookassaClient.GetYooKassaPaymentStatus(paymentID)
+
+	fmt.Printf("GET PAYMENT ID %s", payment.Metadata["product"].(string))
+	product := payment.Metadata["product"].(string)
+
 	if err != nil {
 		log.Printf("GetYooKassaPaymentStatus error: %v", err)
 		ackCallback(bot, cq, "Не удалось проверить платёж. Попробуйте позже.")
@@ -540,7 +618,17 @@ func handleCheckPayment(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, sessio
 	if payment.Status == "succeeded" {
 		yookassaClient.DeletePayment(chatID)
 		fake := &tgbotapi.Message{Chat: cq.Message.Chat, From: cq.From}
-		handleSuccessfulPayment(bot, fake, pfsenseClient, session)
+
+		switch product {
+		case "7 дней":
+			handleSuccessfulPayment(bot, fake, pfsenseClient, 7, session)
+		case "30 дней":
+			handleSuccessfulPayment(bot, fake, pfsenseClient, 30, session)
+		case "6 месяцев":
+			handleSuccessfulPayment(bot, fake, pfsenseClient, 186, session)
+		case "12 месяцев":
+			handleSuccessfulPayment(bot, fake, pfsenseClient, 365, session)
+		}
 		ackCallback(bot, cq, "Оплата подтверждена! Генерируем сертификат.")
 		return
 	}
@@ -558,7 +646,7 @@ func handlePreCheckout(bot *tgbotapi.BotAPI, pcq *tgbotapi.PreCheckoutQuery) {
 	}
 }
 
-func handleSuccessfulPayment(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, pfsenseClient *pfsense.PfSenseClient, session *UserSession) {
+func handleSuccessfulPayment(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, pfsenseClient *pfsense.PfSenseClient, days int, session *UserSession) {
 	chatID := msg.Chat.ID
 	userID := int64(msg.From.ID)
 
@@ -567,7 +655,7 @@ func handleSuccessfulPayment(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, pfsens
 		log.Printf("updateSessionText error: %v", err)
 	}
 
-	if err := createUserAndSendCertificate(chatID, int(userID), pfsenseClient, bot, session); err != nil {
+	if err := createUserAndSendCertificate(chatID, int(userID), pfsenseClient, bot, days, session); err != nil {
 		log.Printf("createUserAndSendCertificate error: %v", err)
 		_ = updateSessionText(bot, chatID, session, stateGetVPN, "Не удалось выдать сертификат. Напишите в поддержку.", "", singleBackKeyboard("nav_menu"))
 		return
@@ -576,7 +664,7 @@ func handleSuccessfulPayment(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, pfsens
 	sendMessageToAdmin(fmt.Sprintf("Пользователь id:%d оплатил VPN", msg.From.ID), msg.From.UserName, bot, userID)
 }
 
-func createUserAndSendCertificate(chatID int64, userID int, pfsenseClient *pfsense.PfSenseClient, bot *tgbotapi.BotAPI, session *UserSession) error {
+func createUserAndSendCertificate(chatID int64, userID int, pfsenseClient *pfsense.PfSenseClient, bot *tgbotapi.BotAPI, days int, session *UserSession) error {
 	telegramUser := fmt.Sprint(userID)
 	certName := fmt.Sprintf("Cert%s", telegramUser)
 
@@ -595,7 +683,7 @@ func createUserAndSendCertificate(chatID int64, userID int, pfsenseClient *pfsen
 		if err != nil {
 			return err
 		}
-		certID, certRefID, err := pfsenseClient.CreateCertificate(certName, uuid, "RSA", 2048, 30, "", "sha256", telegramUser)
+		certID, certRefID, err := pfsenseClient.CreateCertificate(certName, uuid, "RSA", 2048, days, "", "sha256", telegramUser)
 		if err != nil {
 			return err
 		}
