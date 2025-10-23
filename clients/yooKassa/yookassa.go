@@ -71,7 +71,7 @@ func New(shopID, apiKey string) *YooKassaClient {
 	}
 }
 
-func (y *YooKassaClient) CreateYooKassaPayment(amount float64, description string, chatID int64, product string, userEmail string) (*YooKassaPaymentResponse, error) {
+func (y *YooKassaClient) CreateYooKassaPayment(amount float64, description string, chatID int64, product string, extraMeta map[string]interface{}, userEmail string) (*YooKassaPaymentResponse, error) {
 	paymentReq := YooKassaPaymentRequest{}
 
 	paymentReq.Amount.Value = fmt.Sprintf("%.2f", amount)
@@ -89,6 +89,10 @@ func (y *YooKassaClient) CreateYooKassaPayment(amount float64, description strin
 		"chat_id":  chatID,
 		"product":  product,
 		"order_id": fmt.Sprintf("order_%d", chatID),
+	}
+
+	for k, v := range extraMeta {
+		paymentReq.Metadata[k] = v
 	}
 
 	if userEmail != "" {
@@ -185,12 +189,13 @@ func (y *YooKassaClient) GetYooKassaPaymentStatus(paymentID string) (*YooKassaPa
 	return &paymentResp, nil
 }
 
-func (y *YooKassaClient) sendYooKassaPaymentButton(bot *tgbotapi.BotAPI, chatID int64, messageID int, amount float64, productName string, userEmail string) (int, bool, error) {
+func (y *YooKassaClient) sendYooKassaPaymentButton(bot *tgbotapi.BotAPI, chatID int64, messageID int, amount float64, productName string, metadata map[string]interface{}, userEmail string) (int, bool, error) {
 	payment, err := y.CreateYooKassaPayment(
 		amount,
 		productName,
 		chatID,
 		productName,
+		metadata,
 		userEmail,
 	)
 	if err != nil {
@@ -246,8 +251,8 @@ func (y *YooKassaClient) sendYooKassaPaymentButton(bot *tgbotapi.BotAPI, chatID 
 	return sent.MessageID, true, nil
 }
 
-func (y *YooKassaClient) SendVPNPayment(bot *tgbotapi.BotAPI, chatID int64, messageID int, amount float64, productName string, userEmail string) (int, bool, error) {
-	return y.sendYooKassaPaymentButton(bot, chatID, messageID, amount, productName, userEmail)
+func (y *YooKassaClient) SendVPNPayment(bot *tgbotapi.BotAPI, chatID int64, messageID int, amount float64, productName string, metadata map[string]interface{}, userEmail string) (int, bool, error) {
+	return y.sendYooKassaPaymentButton(bot, chatID, messageID, amount, productName, metadata, userEmail)
 }
 
 func (y *YooKassaClient) IsPaymentExist(chatID int64) (string, bool) {
