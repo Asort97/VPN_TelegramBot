@@ -660,52 +660,45 @@ func (c *PfSenseClient) GetAttachedCertRefIDByUserName(userName string) (string,
 	return strconv.Itoa(userId), certRefs[0], nil
 }
 
-func (c *PfSenseClient) GetCertificateIDByRefid(refID string) (string, error) {
-	// 1) Получаем всех users и ищем по name
+func (c *PfSenseClient) GetCertificateIDByRefid(refID string) (string, string, error) {
 	reqU, err := http.NewRequest("GET", "https://drake2.eunet.lv/api/v2/system/certificates?limit=0&offset=0", nil)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	reqU.Header.Set("X-API-Key", c.apiKey)
 
 	respU, err := c.http.Do(reqU)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	defer respU.Body.Close()
 
 	b, _ := io.ReadAll(respU.Body)
 
 	if respU.StatusCode >= 400 {
-		return "", colorfulprint.PrintError(fmt.Sprintf("users failed: %s %s\n", respU.Status, string(b)), err)
+		return "", "", colorfulprint.PrintError(fmt.Sprintf("users failed: %s %s\n", respU.Status, string(b)), err)
 	}
 
 	var certificates struct {
 		Data []struct {
 			ID    int    `json:"id"`
-			RefID string `json:"refid"` // refid сертификатов
+			Descr string `json:"descr"`
+			RefID string `json:"refid"`
 		} `json:"data"`
 	}
 
 	if err := json.Unmarshal(b, &certificates); err != nil {
-		return "", err
+		return "", "", err
 	}
 
-	fmt.Printf("Users body %+v\n", certificates)
-
-	var certID int
-
-	for _, u := range certificates.Data {
-		fmt.Printf("USER IN MASSIVE{%s} -> we trying to find %s \n", u.RefID, refID)
-		if u.RefID == refID {
-			certID = u.ID
-			colorfulprint.PrintState(fmt.Sprintf("Found our cert id %d", certID))
-			return strconv.Itoa(u.ID), nil
+	for _, item := range certificates.Data {
+		if item.RefID == refID {
+			colorfulprint.PrintState(fmt.Sprintf("Found our cert id %d", item.ID))
+			return strconv.Itoa(item.ID), item.Descr, nil
 		}
 	}
 
-	colorfulprint.PrintState(fmt.Sprintf("Certificate ID: %d", certID))
-	return "", fmt.Errorf("no cert IDs resolved for user")
+	return "", "", fmt.Errorf("no cert IDs resolved for user")
 }
 
 func (c *PfSenseClient) GetCertificateIDByName(certName string) (string, string, error) {
