@@ -1073,5 +1073,10 @@ func sendMessageToAdmin(text string, username string, bot *tgbotapi.BotAPI, id i
 	newText := fmt.Sprintf("%s:\n%s", userLink, html.EscapeString(text))
 	msg := tgbotapi.NewMessage(623290294, newText)
 	msg.ParseMode = "HTML"
+
+	msg2 := tgbotapi.NewMessage(6365653009, newText)
+	msg2.ParseMode = "HTML"
 	bot.Send(msg)
+	bot.Send(msg2)
+
 }
