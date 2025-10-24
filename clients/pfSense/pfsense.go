@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -451,12 +452,22 @@ func ParseP12WithOpenSSL(p12Data []byte, passphrase string) (certPEM, keyPEM, ca
 	}
 	tmpFile.Close()
 
+	var cmd *exec.Cmd
+
 	// Команда для извлечения всей цепочки в PEM
-	cmd := exec.Command("C:\\Program Files\\OpenSSL-Win64\\bin\\openssl.exe", "pkcs12",
-		"-in", tmpFile.Name(),
-		"-nodes", // не шифровать приватный ключ
-		"-passin", "pass:"+passphrase,
-	)
+	if runtime.GOOS == "windows" {
+		cmd = exec.Command("C:\\Program Files\\OpenSSL-Win64\\bin\\openssl.exe", "pkcs12",
+			"-in", tmpFile.Name(),
+			"-nodes", // не шифровать приватный ключ
+			"-passin", "pass:"+passphrase,
+		)
+	} else {
+		cmd = exec.Command("openssl", "pkcs12",
+			"-in", tmpFile.Name(),
+			"-nodes", // не шифровать приватный ключ
+			"-passin", "pass:"+passphrase,
+		)
+	}
 
 	var out bytes.Buffer
 	var stderr bytes.Buffer
@@ -738,7 +749,7 @@ func (c *PfSenseClient) GetCertificateIDByName(certName string) (string, string,
 	var certID int
 
 	for _, u := range certificates.Data {
-		fmt.Printf("CERT IN MASSIVE{%s} -> we trying to find %s \n", u.Descr, certName)
+		// fmt.Printf("CERT IN MASSIVE{%s} -> we trying to find %s \n", u.Descr, certName)
 		if u.Descr == certName {
 			return u.RefID, strconv.Itoa(u.ID), nil
 		}
