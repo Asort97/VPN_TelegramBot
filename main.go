@@ -728,7 +728,7 @@ func handleTrial(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, session *User
 	}
 
 	telegramUser := strconv.FormatInt(userID, 10)
-	trialDays := 3
+	trialDays := 30
 	certName := fmt.Sprintf("TrialCert%s_%ddays", telegramUser, trialDays)
 
 	certRefID, certID, err := pfsenseClient.GetCertificateIDByName(certName)
