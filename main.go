@@ -8,10 +8,12 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	instruct "github.com/Asort97/vpnBot/clients/instruction"
 	pfsense "github.com/Asort97/vpnBot/clients/pfSense"
+	sqlite "github.com/Asort97/vpnBot/clients/sqLite"
 	yookassa "github.com/Asort97/vpnBot/clients/yooKassa"
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 )
@@ -33,6 +35,7 @@ var lastActionKey = make(map[int64]map[string]time.Time)
 var invoiceToken string
 var invoiceTokenTest string
 var yookassaClient *yookassa.YooKassaClient
+var sqliteClient *sqlite.Store
 
 type SessionState string
 
@@ -211,6 +214,18 @@ func issuePlanCertificate(bot *tgbotapi.BotAPI, chatID int64, session *UserSessi
 	if err != nil {
 		return err
 	}
+
+	// Add user to SQLite DB (or update days if exists)
+	if err := sqliteClient.AddDays(telegramUser, int64(plan.Days)); err != nil {
+		log.Printf("sqliteClient.AddDays error: %v", err)
+	}
+
+	// Store certRef for the user
+	if err := sqliteClient.SetCertRef(telegramUser, certRefID); err != nil {
+		log.Printf("sqliteClient.SetCertRef error: %v", err)
+	}
+
+	pfsenseClient.UnrevokeCertificate(certRefID)
 
 	return sendCertificate(certRefID, telegramUser, expiresAt, false, chatID, plan.Days, numericUserID, pfsenseClient, bot, session)
 }
@@ -538,11 +553,13 @@ func main() {
 
 	pfsenseClient := pfsense.New(pfsenseApiKey, []byte(tlsBytes))
 	yookassaClient = yookassa.New(yookassaStoreID, yookassaApiKey)
-
+	sqliteClient = sqlite.New("database/data.json")
 	bot, err := tgbotapi.NewBotAPI(botToken)
 	if err != nil {
 		log.Panic(err)
 	}
+
+	go dailyDeductWorker(sqliteClient, bot, pfsenseClient)
 
 	u := tgbotapi.NewUpdate(0)
 	u.Timeout = 60
@@ -556,6 +573,16 @@ func main() {
 		}
 
 		if msg := update.Message; msg != nil {
+			// handle admin commands safely only when message is present
+			if msg.Text == "/revoke" {
+				pfsenseClient.RevokeCertificate("68b043fdeeb8d")
+				continue
+			}
+			if msg.Text == "/unrevoke" {
+				pfsenseClient.UnrevokeCertificate("68b043fdeeb8d")
+				continue
+			}
+
 			handleIncomingMessage(bot, msg, pfsenseClient)
 			continue
 		}
@@ -564,6 +591,37 @@ func main() {
 			handleCallback(bot, cq, pfsenseClient)
 		}
 	}
+}
+
+func revokeAllCertificates(certs []string, pfsenseClient *pfsense.PfSenseClient) {
+
+	var wg sync.WaitGroup
+	wg.Add(len(certs))
+
+	errs := make(chan error, len(certs))
+
+	for _, ref := range certs {
+		ref := ref // захватываем копию
+		go func() {
+			defer wg.Done()
+			if err := pfsenseClient.RevokeCertificate(ref); err != nil {
+				errs <- fmt.Errorf("revoke %s: %w", ref, err)
+			}
+		}()
+	}
+
+	wg.Wait()
+	close(errs)
+
+	// можно проверить были ли ошибки (не обязательно)
+	for err := range errs {
+		log.Println("WARN:", err)
+	}
+
+	// // теперь один rebuild
+	// if err := pfsenseClient.RebuildCRL(); err != nil {
+	// 	log.Println("rebuild error:", err)
+	// }
 }
 
 func handleIncomingMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, pfsenseClient *pfsense.PfSenseClient) {
@@ -662,6 +720,62 @@ func handleCallback(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, pfsenseCli
 	}
 
 	ackCallback(bot, cq, ackText)
+}
+
+func dailyDeductWorker(store *sqlite.Store, bot *tgbotapi.BotAPI, pfsenseClient *pfsense.PfSenseClient) {
+	ticker := time.NewTicker(5 * time.Second) // проверка каждый час
+	defer ticker.Stop()
+
+	for range ticker.C {
+		users := store.GetAllUsers()
+		now := time.Now().UTC()
+
+		var certsToRevoke []string
+
+		for userID, userData := range users {
+			if userData.Days <= 0 {
+				continue // нечего списывать
+			}
+
+			lastDeduct, err := time.Parse(time.RFC3339, userData.LastDeduct)
+			if err != nil {
+				log.Printf("invalid lastDeduct for user %s: %v", userID, err)
+				continue
+			}
+
+			// Прошло ли 24 часа с последнего списания?
+			if now.Sub(lastDeduct) >= 30*time.Second {
+				if err := store.DeductDay(userID); err != nil {
+					log.Printf("failed to deduct day for user %s: %v", userID, err)
+					continue
+				}
+
+				log.Printf("deducted 1 day from user %s (remaining: %d)", userID, userData.Days-1)
+
+				// Опционально: уведомить пользователя
+				if userData.Days-1 == 0 {
+					certRef, err := store.GetCertRef(userID)
+
+					if err != nil {
+						log.Printf("failed to find certref of user %s: %v", userID, err)
+						continue
+					}
+					certsToRevoke = append(certsToRevoke, certRef)
+
+					chatID, _ := strconv.ParseInt(userID, 10, 64)
+					notifyUserSubscriptionExpired(bot, chatID)
+				}
+			}
+		}
+
+		revokeAllCertificates(certsToRevoke, pfsenseClient)
+	}
+}
+
+func notifyUserSubscriptionExpired(bot *tgbotapi.BotAPI, chatID int64) {
+	msg := tgbotapi.NewMessage(chatID, "⚠️ Баланс исчерпан! Продлите подписку, чтобы продолжить пользоваться VPN.")
+	msg.ParseMode = "HTML"
+	bot.Send(msg)
 }
 
 func showMainMenu(bot *tgbotapi.BotAPI, chatID int64, session *UserSession) error {
@@ -793,8 +907,8 @@ func handleStatus(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, session *Use
 	}
 	finalText := fmt.Sprintf(
 		"<b>Профиль:</b>\n"+
-			"   🪪 ID: <code>%d</code>\n"+
-			"   ✉️ Mail: %s\n"+
+			"├ 🪪 ID: <code>%d</code>\n"+
+			"└ ✉️ Mail: %s\n"+
 			"%s",
 		userID, "test", text,
 	)
@@ -1025,9 +1139,12 @@ func sendCertificate(certRefID, telegramUserID, certDateUntil string, isProb boo
 func buildStatusText(pfsenseClient *pfsense.PfSenseClient, userID int) (string, error) {
 	telegramUser := fmt.Sprint(userID)
 	_, certRefID, err := pfsenseClient.GetAttachedCertRefIDByUserName(telegramUser)
+	days, _ := sqliteClient.GetDays(strconv.Itoa(userID))
+
 	if err != nil {
-		return `<b>Статус подписки:</b>
-<b>🔴 Неактивна:</b> оформите тариф, чтобы получить новый сертификат.`, nil
+		return fmt.Sprintf(`<b>Статус подписки:</b>
+<b>└ 🔴 Неактивна:</b> оформите тариф, чтобы получить новый сертификат.
+	Доступно дней : %d`, days), nil
 	}
 
 	certID, certName, err := pfsenseClient.GetCertificateIDByRefid(certRefID)
@@ -1056,8 +1173,9 @@ func buildStatusText(pfsenseClient *pfsense.PfSenseClient, userID int) (string, 
 	return fmt.Sprintf(`<b>Статус подписки:</b>
 <b>🟢 Активна до:</b> %s
 <b>⏳ Осталось дней:</b> %d%s
+<b>⏳ Дней на балансе:</b> %d
 ────────────────────────
-✅ Отличная новость — VPN работает!`, until, daysLeft, extraLine), nil
+✅ Отличная новость — VPN работает!`, until, daysLeft, extraLine, days), nil
 }
 
 func sendMessageToAdmin(text string, username string, bot *tgbotapi.BotAPI, id int64) {

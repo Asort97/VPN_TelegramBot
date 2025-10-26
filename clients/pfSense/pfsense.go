@@ -265,6 +265,7 @@ func (c *PfSenseClient) GetCARef() (string, error) {
 	}
 
 	// Вернём UUID первого CA (или выберите нужный по имени)
+	colorfulprint.PrintState(result.Data[0].RefID)
 	return result.Data[0].RefID, nil
 }
 
@@ -807,6 +808,186 @@ func (c *PfSenseClient) RenewExistingCertificateByRefid(refId string) error {
 	// }
 
 	colorfulprint.PrintState(fmt.Sprintf("Renew cert %s successfully", refId))
+
+	return nil
+}
+
+func (c *PfSenseClient) RevokeCertificate(certRef string) error {
+	url := "https://drake2.eunet.lv/api/v2/system/crl/revoked_certificate"
+
+	_, err := c.GetCertIdInRevocationList(certRef)
+	if err == nil {
+		return colorfulprint.PrintError("Cert already in CRL", err)
+	}
+
+	payload := map[string]interface{}{
+		"parent_id":   0,
+		"certref":     certRef,
+		"revoke_time": time.Now().Unix(),
+	}
+
+	jsonBody, err := json.Marshal(payload)
+	if err != nil {
+		return colorfulprint.PrintError("failed to marshal json: %w", err)
+	}
+
+	req, err := http.NewRequest("POST", url, bytes.NewBuffer(jsonBody))
+	if err != nil {
+		return colorfulprint.PrintError("Cant request REVOKE CERTIFICATE: %w", err)
+	}
+
+	req.Header.Set("X-API-Key", c.apiKey)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return colorfulprint.PrintError("error sending request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+
+	if resp.StatusCode >= 400 {
+		return colorfulprint.PrintError(fmt.Sprintf("failed with status %s: %s", resp.Status, string(body)), nil)
+	}
+
+	colorfulprint.PrintState(fmt.Sprintf("Successfully revoke cert:%s", certRef))
+	return nil
+}
+
+func (c *PfSenseClient) GetCertIdInRevocationList(certRef string) (int, error) {
+	url := "https://drake2.eunet.lv/api/v2/system/crl"
+
+	payload := map[string]interface{}{
+		"id": 0,
+	}
+
+	jsonBody, err := json.Marshal(payload)
+	if err != nil {
+		return -1, colorfulprint.PrintError("failed to marshal json: %w", err)
+	}
+
+	req, err := http.NewRequest("GET", url, bytes.NewBuffer(jsonBody))
+	if err != nil {
+		return -1, colorfulprint.PrintError("Cant request GET REVOCATION LIST: %w", err)
+	}
+
+	req.Header.Set("X-API-Key", c.apiKey)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return -1, colorfulprint.PrintError("error sending request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+
+	if resp.StatusCode >= 400 {
+		return -1, colorfulprint.PrintError(fmt.Sprintf("failed with status %s: %s", resp.Status, string(body)), nil)
+	}
+
+	var r struct {
+		Data struct {
+			Cert []struct {
+				ID      int    `json:"id"`
+				CertRef string `json:"certref"`
+			} `json:"cert"`
+		} `json:"data"`
+	}
+
+	err = json.Unmarshal(body, &r)
+
+	if err != nil {
+		return -1, colorfulprint.PrintError("Couldnt unmarshal responce %w", err)
+	}
+
+	for _, v := range r.Data.Cert {
+		if v.CertRef == certRef {
+			colorfulprint.PrintState("Successfully found certID in revocationList")
+			return v.ID, nil
+		}
+	}
+
+	return -1, colorfulprint.PrintError(fmt.Sprintf("Couldnt find certificate in revocation list with ref{%s}", certRef), nil)
+}
+
+func (c *PfSenseClient) UnrevokeCertificate(certRef string) error {
+	url := "https://drake2.eunet.lv/api/v2/system/crl/revoked_certificate"
+
+	certID, err := c.GetCertIdInRevocationList(certRef)
+	if err != nil {
+		return colorfulprint.PrintError("Couldnt unrevoke certificate: %w", err)
+	}
+
+	payload := map[string]interface{}{
+		"parent_id": 0,
+		"id":        certID,
+	}
+
+	jsonBody, err := json.Marshal(payload)
+	if err != nil {
+		return colorfulprint.PrintError("failed to marshal json: %w", err)
+	}
+
+	req, err := http.NewRequest("DELETE", url, bytes.NewBuffer(jsonBody))
+	if err != nil {
+		return colorfulprint.PrintError("Cant request REVOKE CERTIFICATE: %w", err)
+	}
+
+	req.Header.Set("X-API-Key", c.apiKey)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return colorfulprint.PrintError("error sending request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+
+	if resp.StatusCode >= 400 {
+		return colorfulprint.PrintError(fmt.Sprintf("failed with status %s: %s", resp.Status, string(body)), nil)
+	}
+
+	colorfulprint.PrintState(fmt.Sprintf("Successfully unrevoke cert:%s", certRef))
+
+	return nil
+}
+
+func (c *PfSenseClient) RebuildCRL() error {
+	url := "https://drake2.eunet.lv/api/v2/system/crl"
+
+	payload := map[string]interface{}{
+		"id": 0,
+	}
+
+	jsonBody, err := json.Marshal(payload)
+	if err != nil {
+		return colorfulprint.PrintError("failed to marshal json: %w", err)
+	}
+
+	req, err := http.NewRequest("PATCH", url, bytes.NewBuffer(jsonBody))
+	if err != nil {
+		return colorfulprint.PrintError("Cant request REBUILD CRL: %w", err)
+	}
+
+	req.Header.Set("X-API-Key", c.apiKey)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return colorfulprint.PrintError("error sending request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+
+	if resp.StatusCode >= 400 {
+		return colorfulprint.PrintError(fmt.Sprintf("failed with status %s: %s", resp.Status, string(body)), nil)
+	}
+
+	colorfulprint.PrintState(fmt.Sprintf("Successfully rebuild crl:"))
 
 	return nil
 }
