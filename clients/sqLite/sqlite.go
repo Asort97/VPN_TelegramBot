@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"sync"
 	"time"
 
 	colorfulprint "github.com/Asort97/vpnBot/clients/colorfulPrint"
@@ -19,7 +20,10 @@ type UserData struct {
 	LastDeduct string `json:"last_deduct"` // ISO8601 timestamp
 }
 
-var db map[string]UserData
+var (
+	db   map[string]UserData
+	dbMu sync.Mutex
+)
 
 func New(path string) *Store {
 	return &Store{
@@ -27,7 +31,7 @@ func New(path string) *Store {
 	}
 }
 
-func (s *Store) loadUsers() {
+func (s *Store) loadUsersLocked() {
 	data, err := os.ReadFile(s.path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -53,8 +57,8 @@ func (s *Store) loadUsers() {
 	db = tmp
 }
 
-func (s *Store) saveUsers(users map[string]UserData) error {
-	data, err := json.MarshalIndent(users, "", "  ")
+func (s *Store) saveUsersLocked() error {
+	data, err := json.MarshalIndent(db, "", "  ")
 	if err != nil {
 		return err
 	}
@@ -63,18 +67,14 @@ func (s *Store) saveUsers(users map[string]UserData) error {
 		return err
 	}
 
-	// update package-level db with a copy to avoid aliasing external map
-	newDB := make(map[string]UserData, len(users))
-	for k, v := range users {
-		newDB[k] = v
-	}
-	db = newDB
-
 	return nil
 }
 
 func (s *Store) AddDays(userID string, days int64) error {
-	s.loadUsers()
+	dbMu.Lock()
+	defer dbMu.Unlock()
+
+	s.loadUsersLocked()
 
 	now := time.Now().UTC()
 	userData, exist := db[userID]
@@ -95,11 +95,14 @@ func (s *Store) AddDays(userID string, days int64) error {
 
 	db[userID] = userData
 
-	return s.saveUsers(db)
+	return s.saveUsersLocked()
 }
 
 func (s *Store) GetDays(userID string) (int64, error) {
-	s.loadUsers()
+	dbMu.Lock()
+	defer dbMu.Unlock()
+
+	s.loadUsersLocked()
 
 	userData, exist := db[userID]
 
@@ -111,7 +114,10 @@ func (s *Store) GetDays(userID string) (int64, error) {
 }
 
 func (s *Store) GetCertRef(userID string) (string, error) {
-	s.loadUsers()
+	dbMu.Lock()
+	defer dbMu.Unlock()
+
+	s.loadUsersLocked()
 
 	userData, exist := db[userID]
 
@@ -122,25 +128,50 @@ func (s *Store) GetCertRef(userID string) (string, error) {
 	}
 }
 
-func (s *Store) DeductDay(userID string) error {
-	s.loadUsers()
+func (s *Store) ConsumeDays(userID string, days int64, nextCheck time.Time) (int64, error) {
+	if days <= 0 {
+		return 0, fmt.Errorf("days to consume must be positive")
+	}
+
+	dbMu.Lock()
+	defer dbMu.Unlock()
+
+	s.loadUsersLocked()
 
 	userData, exist := db[userID]
 	if !exist {
-		return fmt.Errorf("user %s not found", userID)
+		return 0, fmt.Errorf("user %s not found", userID)
 	}
 
-	if userData.Days > 0 {
-		userData.Days--
+	if userData.Days <= 0 {
+		return userData.Days, nil
 	}
-	userData.LastDeduct = time.Now().UTC().Format(time.RFC3339)
+
+	if days > userData.Days {
+		days = userData.Days
+	}
+
+	userData.Days -= days
+	if nextCheck.IsZero() {
+		nextCheck = time.Now().UTC()
+	} else {
+		nextCheck = nextCheck.UTC()
+	}
+	userData.LastDeduct = nextCheck.Format(time.RFC3339)
 	db[userID] = userData
 
-	return s.saveUsers(db)
+	if err := s.saveUsersLocked(); err != nil {
+		return 0, err
+	}
+
+	return userData.Days, nil
 }
 
 func (s *Store) GetAllUsers() map[string]UserData {
-	s.loadUsers()
+	dbMu.Lock()
+	defer dbMu.Unlock()
+
+	s.loadUsersLocked()
 	result := make(map[string]UserData)
 	for k, v := range db {
 		result[k] = v
@@ -151,7 +182,10 @@ func (s *Store) GetAllUsers() map[string]UserData {
 // SetCertRef сохраняет или обновляет certRef для пользователя,
 // не изменяя Days и корректно инициализируя запись при необходимости.
 func (s *Store) SetCertRef(userID, certRef string) error {
-	s.loadUsers()
+	dbMu.Lock()
+	defer dbMu.Unlock()
+
+	s.loadUsersLocked()
 
 	ud, ok := db[userID]
 	if !ok {
@@ -162,5 +196,5 @@ func (s *Store) SetCertRef(userID, certRef string) error {
 	}
 	ud.CertRef = certRef
 	db[userID] = ud
-	return s.saveUsers(db)
+	return s.saveUsersLocked()
 }
