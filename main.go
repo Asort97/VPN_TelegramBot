@@ -8,7 +8,6 @@ import (
 	"os"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	instruct "github.com/Asort97/vpnBot/clients/instruction"
@@ -35,6 +34,88 @@ var lastActionKey = make(map[int64]map[string]time.Time)
 var yookassaClient *yookassa.YooKassaClient
 var sqliteClient *sqlite.Store
 var privacyURL string
+
+// pfSense async job dispatcher to run heavy revoke/unrevoke in background
+type pfOpType int
+
+const (
+	pfOpRevoke pfOpType = iota
+	pfOpUnrevoke
+)
+
+type pfJob struct {
+	op      pfOpType
+	certRef string
+}
+
+var (
+	pfJobs         chan pfJob
+	pfClientGlobal *pfsense.PfSenseClient
+)
+
+func startPfWorkers(client *pfsense.PfSenseClient, concurrency int) {
+	if concurrency < 1 {
+		concurrency = 1
+	}
+	pfClientGlobal = client
+	// buffered queue to avoid blocking bot handlers
+	pfJobs = make(chan pfJob, 256)
+	for i := 0; i < concurrency; i++ {
+		workerID := i + 1
+		go func() {
+			for job := range pfJobs {
+				switch job.op {
+				case pfOpRevoke:
+					if err := client.RevokeCertificate(job.certRef); err != nil {
+						log.Printf("[pfWorker %d] revoke %s error: %v", workerID, job.certRef, err)
+					}
+				case pfOpUnrevoke:
+					if err := client.UnrevokeCertificate(job.certRef); err != nil {
+						log.Printf("[pfWorker %d] unrevoke %s error: %v", workerID, job.certRef, err)
+					}
+				}
+			}
+		}()
+	}
+}
+
+// Non-blocking scheduling helpers
+func scheduleRevoke(certRef string) {
+	if certRef == "" {
+		return
+	}
+	select {
+	case pfJobs <- pfJob{op: pfOpRevoke, certRef: certRef}:
+	default:
+		// Fallback: run in separate goroutine to avoid blocking
+		go func(ref string) {
+			if pfClientGlobal == nil {
+				return
+			}
+			if err := pfClientGlobal.RevokeCertificate(ref); err != nil {
+				log.Printf("[pfFallback] revoke %s error: %v", ref, err)
+			}
+		}(certRef)
+	}
+}
+
+func scheduleUnrevoke(certRef string) {
+	if certRef == "" {
+		return
+	}
+	select {
+	case pfJobs <- pfJob{op: pfOpUnrevoke, certRef: certRef}:
+	default:
+		go func(ref string) {
+			if pfClientGlobal == nil {
+				return
+			}
+			if err := pfClientGlobal.UnrevokeCertificate(ref); err != nil {
+				log.Printf("[pfFallback] unrevoke %s error: %v", ref, err)
+			}
+		}(certRef)
+	}
+}
 
 type SessionState string
 
@@ -272,9 +353,8 @@ func issuePlanCertificate(bot *tgbotapi.BotAPI, chatID int64, session *UserSessi
 		}
 	}
 
-	if err := pfsenseClient.UnrevokeCertificate(certRefID); err != nil {
-		log.Printf("Unrevoke certificate %s error: %v", certRefID, err)
-	}
+	// Run unrevoke asynchronously to avoid blocking
+	scheduleUnrevoke(certRefID)
 
 	return sendCertificate(certRefID, telegramUser, chatID, plan.Days, numericUserID, pfsenseClient, bot, session)
 }
@@ -616,6 +696,9 @@ func main() {
 	pfsenseClient := pfsense.New(pfsenseApiKey, []byte(tlsBytes))
 	yookassaClient = yookassa.New(yookassaStoreID, yookassaApiKey)
 	sqliteClient = sqlite.New("database/data.json")
+
+	// Start pfSense async workers (do not block bot on revoke/unrevoke)
+	startPfWorkers(pfsenseClient, 5)
 	bot, err := tgbotapi.NewBotAPI(botToken)
 	if err != nil {
 		log.Panic(err)
@@ -637,11 +720,13 @@ func main() {
 		if msg := update.Message; msg != nil {
 			// handle admin commands safely only when message is present
 			if msg.Text == "/revoke" {
-				pfsenseClient.RevokeCertificate("68b043fdeeb8d")
+				// example: schedule a test revoke without blocking
+				scheduleRevoke("68b043fdeeb8d")
 				continue
 			}
 			if msg.Text == "/unrevoke" {
-				pfsenseClient.UnrevokeCertificate("68b043fdeeb8d")
+				// example: schedule a test unrevoke without blocking
+				scheduleUnrevoke("68b043fdeeb8d")
 				continue
 			}
 
@@ -655,35 +740,15 @@ func main() {
 	}
 }
 
-func revokeAllCertificates(certs []string, pfsenseClient *pfsense.PfSenseClient) {
-
-	var wg sync.WaitGroup
-	wg.Add(len(certs))
-
-	errs := make(chan error, len(certs))
-
+func revokeAllCertificates(certs []string, _ *pfsense.PfSenseClient) {
+	// Schedule all revokes asynchronously; don't block caller
 	for _, ref := range certs {
-		ref := ref // захватываем копию
-		go func() {
-			defer wg.Done()
-			if err := pfsenseClient.RevokeCertificate(ref); err != nil {
-				errs <- fmt.Errorf("revoke %s: %w", ref, err)
-			}
-		}()
+		if strings.TrimSpace(ref) == "" {
+			continue
+		}
+		scheduleRevoke(ref)
 	}
-
-	wg.Wait()
-	close(errs)
-
-	// можно проверить были ли ошибки (не обязательно)
-	for err := range errs {
-		log.Println("WARN:", err)
-	}
-
-	// // теперь один rebuild
-	// if err := pfsenseClient.RebuildCRL(); err != nil {
-	// 	log.Println("rebuild error:", err)
-	// }
+	// No waiting here; workers will process in background
 }
 
 func handleIncomingMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, pfsenseClient *pfsense.PfSenseClient) {
@@ -954,8 +1019,8 @@ func handleCallback(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, pfsenseCli
 
 func dailyDeductWorker(store *sqlite.Store, bot *tgbotapi.BotAPI, pfsenseClient *pfsense.PfSenseClient) {
 	const (
-		checkInterval   = time.Second
-		consumptionStep = 10 * time.Second
+		checkInterval   = time.Hour
+		consumptionStep = 24 * time.Hour
 	)
 
 	ticker := time.NewTicker(checkInterval) // регулярная проверка баланса
@@ -1064,6 +1129,11 @@ func handleGetVPN(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, session *Use
 		log.Printf("ensureUserCertificate error: %v", err)
 		_ = updateSessionText(bot, chatID, session, stateGetVPN, "Не удалось подготовить сертификат. Попробуйте позже или обратитесь в поддержку.", "", singleBackKeyboard("nav_menu"))
 		return
+	}
+
+	// Если на балансе 0 дней, гарантируем, что сертификат остаётся ревоукнутым (на всякий случай)
+	if days, _ := sqliteClient.GetDays(telegramUser); days <= 0 {
+		scheduleRevoke(certRefID)
 	}
 
 	if err := sendCertificate(certRefID, telegramUser, chatID, 0, userID, pfsenseClient, bot, session); err != nil {
@@ -1220,7 +1290,7 @@ func handleRateSelection(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, sessi
 	userID := strconv.FormatInt(cq.From.ID, 10)
 	if email, _ := sqliteClient.GetEmail(userID); strings.TrimSpace(email) == "" {
 		text := fmt.Sprintf(
-			"Перед оплатой укажите e-mail и подтвердите согласие с <a href=\"%s\">Политикой конфиденциальности</a>.\n\nОтправьте ваш e-mail одним сообщением.",
+			"Укажите e-mail, написав его в чате. Продолжая вы подтверждаете согласие с <a href=\"%s\">Политикой конфиденциальности</a>.\n\nОтправьте ваш e-mail одним сообщением.",
 			getPrivacyURL(),
 		)
 		kb := tgbotapi.NewInlineKeyboardMarkup(
@@ -1301,25 +1371,19 @@ func handleInstructionSelection(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery
 
 func handleCheckPayment(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, session *UserSession, pfsenseClient *pfsense.PfSenseClient) {
 	chatID := cq.Message.Chat.ID
-	paymentID, exists := yookassaClient.IsPaymentExist(chatID)
-	if !exists {
-		ackCallback(bot, cq, "Активный платеж не найден.")
-		return
-	}
-
-	payment, err := yookassaClient.GetYooKassaPaymentStatus(paymentID)
+	payment, ok, err := yookassaClient.FindSucceededPayment(chatID)
 	if err != nil {
-		log.Printf("GetYooKassaPaymentStatus error: %v", err)
+		log.Printf("FindSucceededPayment error: %v", err)
 		ackCallback(bot, cq, "Не удалось проверить платеж. Попробуйте позже.")
 		return
 	}
-
-	if payment.Status != "succeeded" {
-		ackCallback(bot, cq, "Платеж еще обрабатывается. Попробуйте чуть позже.")
+	if !ok || payment == nil {
+		ackCallback(bot, cq, "Платеж еще обрабатывается или не найден. Если вы уже оплатили — подождите 5–10 секунд и нажмите еще раз.")
 		return
 	}
 
-	yookassaClient.DeletePayment(chatID)
+	// очищаем историю платежей после успешной обработки
+	yookassaClient.ClearPayments(chatID)
 
 	meta := payment.Metadata
 	plan := resolvePlanFromMetadata(meta, session)
