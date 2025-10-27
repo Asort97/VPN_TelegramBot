@@ -1,7 +1,6 @@
 package main
 
 import (
-	"errors"
 	"fmt"
 	"html"
 	"log"
@@ -42,6 +41,7 @@ type SessionState string
 const (
 	stateMenu         SessionState = "menu"
 	stateGetVPN       SessionState = "get_vpn"
+	stateTopUp        SessionState = "top_up"
 	stateTrial        SessionState = "trial"
 	stateStatus       SessionState = "status"
 	stateSupport      SessionState = "support"
@@ -60,10 +60,12 @@ type RatePlan struct {
 
 // ratePlans содержит список доступных тарифов. При необходимости поменяйте названия и цены.
 var ratePlans = []RatePlan{
-	{ID: "7d", Title: "7 дней", Amount: 49, Days: 7, Description: "Идеально, чтобы протестировать сервис или уехать на короткое время."},
-	{ID: "30d", Title: "30 дней", Amount: 199, Days: 30, Description: "Базовая подписка для постоянного доступа без ограничений."},
-	{ID: "180d", Title: "6 месяцев", Amount: 999, Days: 180, Description: "Полугодовой тариф со скидкой по сравнению с помесячной оплатой."},
-	{ID: "365d", Title: "12 месяцев", Amount: 1899, Days: 365, Description: "Максимальная выгода для тех, кто пользуется VPN круглый год."},
+	{ID: "15d", Title: "15 дней", Amount: 25, Days: 15, Description: "Идеально, чтобы протестировать сервис или уехать на короткое время."},
+	{ID: "30d", Title: "30 дней", Amount: 50, Days: 30, Description: "Идеально, чтобы протестировать сервис или уехать на короткое время."},
+	{ID: "60d", Title: "60 дней", Amount: 100, Days: 60, Description: "Базовая подписка для постоянного доступа без ограничений."},
+	{ID: "120d", Title: "120 дней", Amount: 200, Days: 120, Description: "Полугодовой тариф со скидкой по сравнению с помесячной оплатой."},
+	{ID: "240d", Title: "240 дней", Amount: 300, Days: 240, Description: "Полугодовой тариф со скидкой по сравнению с помесячной оплатой."},
+	{ID: "365d", Title: "365 дней", Amount: 400, Days: 365, Description: "Максимальная выгода для тех, кто пользуется VPN круглый год."},
 }
 
 var ratePlanByID = func() map[string]RatePlan {
@@ -134,9 +136,20 @@ func ensureVPNUser(pfsenseClient *pfsense.PfSenseClient, telegramUser string) (s
 	return pfsenseClient.CreateUser(telegramUser, "123", "", "", false)
 }
 
-func createAndAttachCertificate(pfsenseClient *pfsense.PfSenseClient, telegramUser string, userID string, days int) (string, string, error) {
-	if days <= 0 {
-		days = 30
+const certificateLifetimeDays = 3650
+
+func createAndAttachCertificate(pfsenseClient *pfsense.PfSenseClient, telegramUser string, userID string) (string, string, error) {
+	certName := fmt.Sprintf("Cert%s_permanent", telegramUser)
+
+	if existingRefID, existingID, err := pfsenseClient.GetCertificateIDByName(certName); err == nil {
+		if err := pfsenseClient.AttachCertificateToUser(userID, existingRefID); err != nil {
+			return "", "", err
+		}
+		_, expiresAt, _, _, err := pfsenseClient.GetDateOfCertificate(existingID)
+		if err != nil {
+			return "", "", err
+		}
+		return existingRefID, expiresAt, nil
 	}
 
 	uuid, err := pfsenseClient.GetCARef()
@@ -144,8 +157,7 @@ func createAndAttachCertificate(pfsenseClient *pfsense.PfSenseClient, telegramUs
 		return "", "", err
 	}
 
-	certName := fmt.Sprintf("Cert%s_%ddays", telegramUser, days)
-	certID, certRefID, err := pfsenseClient.CreateCertificate(certName, uuid, "RSA", 2048, days, "", "sha256", telegramUser)
+	certID, certRefID, err := pfsenseClient.CreateCertificate(certName, uuid, "RSA", 2048, certificateLifetimeDays, "", "sha256", telegramUser)
 	if err != nil {
 		return "", "", err
 	}
@@ -162,74 +174,118 @@ func createAndAttachCertificate(pfsenseClient *pfsense.PfSenseClient, telegramUs
 	return certRefID, expiresAt, nil
 }
 
-func sendExistingCertificate(bot *tgbotapi.BotAPI, chatID int64, session *UserSession, pfsenseClient *pfsense.PfSenseClient, state userState, telegramUser string, numericUserID int64) error {
-	if state.CertRefID == "" || state.CertExpireAt == "" {
-		return fmt.Errorf("certificate data is missing")
-	}
-
-	days := state.CertDays
-	if days == 0 {
-		days = extractDaysFromCertName(state.CertName)
-	}
-	return sendCertificate(state.CertRefID, telegramUser, state.CertExpireAt, false, chatID, days, numericUserID, pfsenseClient, bot, session)
-}
-
-func deleteCertificateIfExists(pfsenseClient *pfsense.PfSenseClient, certID string) {
-	if certID == "" {
-		return
-	}
-
-	if err := pfsenseClient.DeleteUserCertificate(certID); err != nil {
-		log.Printf("delete certificate error: %v", err)
-	}
-}
-
-var errSubscriptionActive = errors.New("subscription is still active")
-
-func issuePlanCertificate(bot *tgbotapi.BotAPI, chatID int64, session *UserSession, plan RatePlan, pfsenseClient *pfsense.PfSenseClient, telegramUser string, numericUserID int64) error {
+func ensureUserCertificate(pfsenseClient *pfsense.PfSenseClient, telegramUser string) (string, string, string, error) {
 	state, err := fetchUserState(pfsenseClient, telegramUser)
 	if err != nil {
-		return err
+		return "", "", "", err
 	}
 
 	userID := state.UserID
 	if !state.UserExists || userID == "" {
 		userID, err = ensureVPNUser(pfsenseClient, telegramUser)
 		if err != nil {
-			return err
+			return "", "", "", err
 		}
 	}
 
-	if state.CertID != "" {
-		if !state.CertExpired {
-			if err := sendExistingCertificate(bot, chatID, session, pfsenseClient, state, telegramUser, numericUserID); err != nil {
-				return err
+	certRefID := state.CertRefID
+	certID := state.CertID
+	expiresAt := state.CertExpireAt
+
+	if certRefID == "" {
+		if ref, getErr := sqliteClient.GetCertRef(telegramUser); getErr == nil && ref != "" {
+			certRefID = ref
+		}
+	}
+
+	if certRefID != "" && certID == "" {
+		if id, _, getErr := pfsenseClient.GetCertificateIDByRefid(certRefID); getErr == nil {
+			certID = id
+		} else {
+			log.Printf("GetCertificateIDByRefid error: %v", getErr)
+			certRefID = ""
+		}
+	}
+
+	createdNew := false
+	if certRefID == "" {
+		certRefID, expiresAt, err = createAndAttachCertificate(pfsenseClient, telegramUser, userID)
+		if err != nil {
+			return "", "", "", err
+		}
+		createdNew = true
+	} else {
+		if err := pfsenseClient.AttachCertificateToUser(userID, certRefID); err != nil {
+			return "", "", "", err
+		}
+		if expiresAt == "" {
+			if certID == "" {
+				if id, _, getErr := pfsenseClient.GetCertificateIDByRefid(certRefID); getErr == nil {
+					certID = id
+				} else {
+					log.Printf("GetCertificateIDByRefid error: %v", getErr)
+				}
 			}
-			return errSubscriptionActive
+			if certID != "" {
+				if _, expires, _, _, getErr := pfsenseClient.GetDateOfCertificate(certID); getErr == nil {
+					expiresAt = expires
+				} else {
+					log.Printf("GetDateOfCertificate error: %v", getErr)
+				}
+			}
 		}
-		deleteCertificateIfExists(pfsenseClient, state.CertID)
 	}
 
-	certRefID, expiresAt, err := createAndAttachCertificate(pfsenseClient, telegramUser, userID, plan.Days)
-	if err != nil {
-		return err
-	}
-
-	// Add user to SQLite DB (or update days if exists)
-	if err := sqliteClient.AddDays(telegramUser, int64(plan.Days)); err != nil {
-		log.Printf("sqliteClient.AddDays error: %v", err)
-	}
-
-	// Store certRef for the user
 	if err := sqliteClient.SetCertRef(telegramUser, certRefID); err != nil {
 		log.Printf("sqliteClient.SetCertRef error: %v", err)
 	}
 
-	pfsenseClient.UnrevokeCertificate(certRefID)
+	if expiresAt == "" && !createdNew {
+		if certID == "" {
+			if id, _, getErr := pfsenseClient.GetCertificateIDByRefid(certRefID); getErr == nil {
+				certID = id
+			}
+		}
+		if certID != "" {
+			if _, expires, _, _, getErr := pfsenseClient.GetDateOfCertificate(certID); getErr == nil {
+				expiresAt = expires
+			} else {
+				log.Printf("GetDateOfCertificate error: %v", getErr)
+			}
+		}
+	}
+
+	return certRefID, expiresAt, userID, nil
+}
+
+func issuePlanCertificate(bot *tgbotapi.BotAPI, chatID int64, session *UserSession, plan RatePlan, pfsenseClient *pfsense.PfSenseClient, telegramUser string, numericUserID int64) error {
+	certRefID, expiresAt, _, err := ensureUserCertificate(pfsenseClient, telegramUser)
+	if err != nil {
+		return err
+	}
+
+	if plan.Days > 0 {
+		if err := sqliteClient.AddDays(telegramUser, int64(plan.Days)); err != nil {
+			log.Printf("sqliteClient.AddDays error: %v", err)
+		}
+	}
+
+	if err := pfsenseClient.UnrevokeCertificate(certRefID); err != nil {
+		log.Printf("Unrevoke certificate %s error: %v", certRefID, err)
+	}
+
+	if expiresAt == "" {
+		if id, _, getErr := pfsenseClient.GetCertificateIDByRefid(certRefID); getErr == nil {
+			if _, exp, _, _, getErr := pfsenseClient.GetDateOfCertificate(id); getErr == nil {
+				expiresAt = exp
+			} else {
+				log.Printf("GetDateOfCertificate error: %v", getErr)
+			}
+		}
+	}
 
 	return sendCertificate(certRefID, telegramUser, expiresAt, false, chatID, plan.Days, numericUserID, pfsenseClient, bot, session)
 }
-
 func resolvePlanFromMetadata(meta map[string]interface{}, session *UserSession) RatePlan {
 	plan := RatePlan{}
 
@@ -325,7 +381,7 @@ func resolvePlanFromMetadata(meta map[string]interface{}, session *UserSession) 
 				plan.Amount = preset.Amount
 			}
 		} else {
-			plan.Title = fmt.Sprintf("Тариф %s", plan.ID)
+			plan.Title = fmt.Sprintf("Пакет %s", plan.ID)
 		}
 	}
 
@@ -460,15 +516,16 @@ func replaceSessionWithDocument(bot *tgbotapi.BotAPI, chatID int64, session *Use
 func mainMenuInlineKeyboard() tgbotapi.InlineKeyboardMarkup {
 	return tgbotapi.NewInlineKeyboardMarkup(
 		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("🐱 Получить VPN", "nav_get_vpn"),
-			tgbotapi.NewInlineKeyboardButtonData("Пробный VPN 🎁", "nav_trial"),
+			tgbotapi.NewInlineKeyboardButtonData("Подключить VPN", "nav_get_vpn"),
+			tgbotapi.NewInlineKeyboardButtonData("Пополнить баланс", "nav_topup"),
 		),
 		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("🙍 Профиль", "nav_status"),
+			// tgbotapi.NewInlineKeyboardButtonData("VPN бесплатно", "nav_trial"),
+			tgbotapi.NewInlineKeyboardButtonData("Статус", "nav_status"),
 		),
 		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("📚 Инструкции", "nav_instructions"),
-			tgbotapi.NewInlineKeyboardButtonData("Поддержка 🆘 ", "nav_support"),
+			tgbotapi.NewInlineKeyboardButtonData("Инструкции", "nav_instructions"),
+			tgbotapi.NewInlineKeyboardButtonData("Поддержка", "nav_support"),
 		),
 	)
 }
@@ -498,12 +555,26 @@ func singleBackKeyboard(target string) tgbotapi.InlineKeyboardMarkup {
 
 func rateSelectionKeyboard() tgbotapi.InlineKeyboardMarkup {
 	var rows [][]tgbotapi.InlineKeyboardButton
+	var currentRow []tgbotapi.InlineKeyboardButton
+
 	for _, plan := range ratePlans {
 		label := fmt.Sprintf("%s — %.0f ₽", plan.Title, plan.Amount)
-		rows = append(rows, tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData(label, "rate_"+plan.ID),
-		))
+		btn := tgbotapi.NewInlineKeyboardButtonData(label, "rate_"+plan.ID)
+		currentRow = append(currentRow, btn)
+
+		// По 3 кнопки в строку
+		if len(currentRow) == 3 {
+			rows = append(rows, currentRow)
+			currentRow = nil
+		}
 	}
+
+	// Добавить остаток (если есть)
+	if len(currentRow) > 0 {
+		rows = append(rows, currentRow)
+	}
+
+	// Кнопка "Назад" всегда на отдельной строке
 	rows = append(rows, tgbotapi.NewInlineKeyboardRow(
 		tgbotapi.NewInlineKeyboardButtonData("⬅️ Назад в меню", "nav_menu"),
 	))
@@ -516,7 +587,7 @@ func showRateSelection(bot *tgbotapi.BotAPI, chatID int64, session *UserSession,
 	if strings.TrimSpace(intro) != "" {
 		parts = append(parts, intro)
 	}
-	parts = append(parts, "<b>Доступные тарифы:</b>")
+	parts = append(parts, "<b>Выберите вариант пополнения:</b>")
 	for _, plan := range ratePlans {
 		planText := fmt.Sprintf("• <b>%s</b> — %.0f ₽\n%s", plan.Title, plan.Amount, plan.Description)
 		parts = append(parts, planText)
@@ -632,15 +703,12 @@ func handleIncomingMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, pfsenseC
 		plan, ok := ratePlanByID[session.PendingPlanID]
 		if !ok {
 			log.Printf("successful payment received but plan is unknown")
-			_ = updateSessionText(bot, chatID, session, stateGetVPN, "Не удалось определить тариф. Напишите в поддержку, чтобы получить сертификат.", "", singleBackKeyboard("nav_menu"))
+			_ = updateSessionText(bot, chatID, session, stateTopUp, "Не нашли информацию об оплате. Напишите в поддержку.", "", singleBackKeyboard("nav_menu"))
 			return
 		}
 		if err := handleSuccessfulPayment(bot, msg, pfsenseClient, plan, session); err != nil {
-			if errors.Is(err, errSubscriptionActive) {
-				return
-			}
 			log.Printf("handleSuccessfulPayment error: %v", err)
-			_ = updateSessionText(bot, chatID, session, stateGetVPN, "Не удалось завершить оплату. Свяжитесь с поддержкой.", "", singleBackKeyboard("nav_menu"))
+			_ = updateSessionText(bot, chatID, session, stateTopUp, "Не удалось обработать оплату. Попробуйте позже.", "", singleBackKeyboard("nav_menu"))
 		}
 		return
 	}
@@ -674,6 +742,8 @@ func handleCallback(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, pfsenseCli
 		}
 	case data == "nav_get_vpn":
 		handleGetVPN(bot, cq, session, pfsenseClient)
+	case data == "nav_topup":
+		handleTopUp(bot, cq, session, pfsenseClient)
 	case data == "nav_trial" || data == "trial":
 		handleTrial(bot, cq, session, pfsenseClient)
 	case data == "nav_status":
@@ -723,7 +793,12 @@ func handleCallback(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, pfsenseCli
 }
 
 func dailyDeductWorker(store *sqlite.Store, bot *tgbotapi.BotAPI, pfsenseClient *pfsense.PfSenseClient) {
-	ticker := time.NewTicker(5 * time.Second) // проверка каждый час
+	const (
+		checkInterval   = time.Second
+		consumptionStep = 10 * time.Second
+	)
+
+	ticker := time.NewTicker(checkInterval) // регулярная проверка баланса
 	defer ticker.Stop()
 
 	for range ticker.C {
@@ -734,7 +809,7 @@ func dailyDeductWorker(store *sqlite.Store, bot *tgbotapi.BotAPI, pfsenseClient 
 
 		for userID, userData := range users {
 			if userData.Days <= 0 {
-				continue // нечего списывать
+				continue
 			}
 
 			lastDeduct, err := time.Parse(time.RFC3339, userData.LastDeduct)
@@ -743,32 +818,47 @@ func dailyDeductWorker(store *sqlite.Store, bot *tgbotapi.BotAPI, pfsenseClient 
 				continue
 			}
 
-			// Прошло ли 24 часа с последнего списания?
-			if now.Sub(lastDeduct) >= 30*time.Second {
-				if err := store.DeductDay(userID); err != nil {
-					log.Printf("failed to deduct day for user %s: %v", userID, err)
+			elapsed := now.Sub(lastDeduct)
+			if elapsed < consumptionStep {
+				continue
+			}
+
+			daysToCharge := int64(elapsed / consumptionStep)
+			if daysToCharge <= 0 {
+				continue
+			}
+
+			nextCheckpoint := lastDeduct.Add(time.Duration(daysToCharge) * consumptionStep)
+			remaining, err := store.ConsumeDays(userID, daysToCharge, nextCheckpoint)
+			if err != nil {
+				log.Printf("failed to deduct %d day(s) for user %s: %v", daysToCharge, userID, err)
+				continue
+			}
+
+			log.Printf("deducted %d day(s) from user %s (remaining: %d)", daysToCharge, userID, remaining)
+
+			if remaining == 0 {
+				certRef, err := store.GetCertRef(userID)
+				if err != nil {
+					log.Printf("failed to find certref of user %s: %v", userID, err)
 					continue
 				}
-
-				log.Printf("deducted 1 day from user %s (remaining: %d)", userID, userData.Days-1)
-
-				// Опционально: уведомить пользователя
-				if userData.Days-1 == 0 {
-					certRef, err := store.GetCertRef(userID)
-
-					if err != nil {
-						log.Printf("failed to find certref of user %s: %v", userID, err)
-						continue
-					}
+				if certRef != "" {
 					certsToRevoke = append(certsToRevoke, certRef)
-
-					chatID, _ := strconv.ParseInt(userID, 10, 64)
-					notifyUserSubscriptionExpired(bot, chatID)
 				}
+
+				chatID, err := strconv.ParseInt(userID, 10, 64)
+				if err != nil {
+					log.Printf("failed to parse chat id %s: %v", userID, err)
+					continue
+				}
+				notifyUserSubscriptionExpired(bot, chatID)
 			}
 		}
 
-		revokeAllCertificates(certsToRevoke, pfsenseClient)
+		if len(certsToRevoke) > 0 {
+			revokeAllCertificates(certsToRevoke, pfsenseClient)
+		}
 	}
 }
 
@@ -788,43 +878,57 @@ func handleGetVPN(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, session *Use
 	userID := int64(cq.From.ID)
 
 	if !canProceedKey(userID, "get_vpn", 5*time.Second) {
-		ackCallback(bot, cq, "Подождите пару секунд и попробуйте снова.")
+		ackCallback(bot, cq, "Пожалуйста, немного подождите перед повторным запросом.")
 		return
 	}
 
-	waitingText := "⏳ Готовим ваш VPN, это займёт пару секунд..."
+	waitingText := "Готовим для вас конфигурацию VPN..."
 	if err := updateSessionText(bot, chatID, session, stateGetVPN, waitingText, "HTML", singleBackKeyboard("nav_menu")); err != nil {
 		log.Printf("updateSessionText error: %v", err)
 	}
 
 	session.PendingPlanID = ""
 	telegramUser := fmt.Sprint(userID)
-	state, err := fetchUserState(pfsenseClient, telegramUser)
+
+	certRefID, expiresAt, _, err := ensureUserCertificate(pfsenseClient, telegramUser)
 	if err != nil {
-		log.Printf("fetchUserState error: %v", err)
-		_ = updateSessionText(bot, chatID, session, stateGetVPN, "Не удалось получить статус подписки. Попробуйте позже.", "", singleBackKeyboard("nav_menu"))
+		log.Printf("ensureUserCertificate error: %v", err)
+		_ = updateSessionText(bot, chatID, session, stateGetVPN, "Не удалось подготовить сертификат. Попробуйте позже или обратитесь в поддержку.", "", singleBackKeyboard("nav_menu"))
 		return
 	}
 
-	if state.CertRefID != "" && !state.CertExpired {
-		if err := sendExistingCertificate(bot, chatID, session, pfsenseClient, state, telegramUser, userID); err != nil {
-			log.Printf("sendExistingCertificate error: %v", err)
-		}
-		sendMessageToAdmin(fmt.Sprintf("Пользователь id:%d запросил повторную выдачу сертификата", cq.From.ID), cq.From.UserName, bot, userID)
+	if err := sendCertificate(certRefID, telegramUser, expiresAt, false, chatID, 0, userID, pfsenseClient, bot, session); err != nil {
+		log.Printf("sendCertificate error: %v", err)
+		_ = updateSessionText(bot, chatID, session, stateGetVPN, "Не удалось отправить файл. Попробуйте позже или обратитесь в поддержку.", "", singleBackKeyboard("nav_menu"))
 		return
 	}
 
-	intro := "Сертификат для вашего аккаунта не найден. Выберите тариф, чтобы оформить подписку."
-	if state.CertRefID != "" && state.CertExpired {
-		intro = "Срок действия предыдущей подписки закончился. Выберите новый тариф, чтобы продолжить пользоваться VPN."
+	sendMessageToAdmin(fmt.Sprintf("Пользователь id:%d запросил выдачу VPN-конфига", cq.From.ID), cq.From.UserName, bot, userID)
+}
+
+func handleTopUp(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, session *UserSession, pfsenseClient *pfsense.PfSenseClient) {
+	chatID := cq.Message.Chat.ID
+	userID := int64(cq.From.ID)
+
+	if !canProceedKey(userID, "top_up", 5*time.Second) {
+		ackCallback(bot, cq, "Подождите пару секунд перед новым запросом.")
+		return
 	}
 
+	telegramUser := fmt.Sprint(userID)
+	currentDays, err := sqliteClient.GetDays(telegramUser)
+	if err != nil {
+		currentDays = 0
+	}
+
+	intro := fmt.Sprintf("Текущий баланс: %d дней. Выберите пополнение.", currentDays)
 	if err := showRateSelection(bot, chatID, session, intro); err != nil {
 		log.Printf("showRateSelection error: %v", err)
-		_ = updateSessionText(bot, chatID, session, stateGetVPN, "Не удалось показать тарифы. Попробуйте позже.", "", singleBackKeyboard("nav_menu"))
+		_ = updateSessionText(bot, chatID, session, stateTopUp, "Не удалось показать варианты пополнения. Попробуйте позже.", "", singleBackKeyboard("nav_menu"))
+		return
 	}
 
-	sendMessageToAdmin(fmt.Sprintf("Пользователь id:%d открыл покупку VPN", cq.From.ID), cq.From.UserName, bot, userID)
+	sendMessageToAdmin(fmt.Sprintf("Пользователь id:%d открыл меню пополнения.", cq.From.ID), cq.From.UserName, bot, userID)
 }
 
 func handleTrial(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, session *UserSession, pfsenseClient *pfsense.PfSenseClient) {
@@ -944,34 +1048,16 @@ func handleInstructionsMenu(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, se
 
 func handleRateSelection(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, session *UserSession, plan RatePlan, pfsenseClient *pfsense.PfSenseClient) {
 	chatID := cq.Message.Chat.ID
-	userID := int64(cq.From.ID)
-	telegramUser := fmt.Sprint(userID)
-
-	state, err := fetchUserState(pfsenseClient, telegramUser)
-	if err != nil {
-		log.Printf("fetchUserState error: %v", err)
-		_ = updateSessionText(bot, chatID, session, stateGetVPN, "Не удалось проверить статус подписки. Попробуйте позже.", "", singleBackKeyboard("nav_menu"))
-		ackCallback(bot, cq, "Не удалось проверить подписку")
-		return
-	}
-
-	if state.CertRefID != "" && !state.CertExpired {
-		if err := sendExistingCertificate(bot, chatID, session, pfsenseClient, state, telegramUser, userID); err != nil {
-			log.Printf("sendExistingCertificate error: %v", err)
-		}
-		session.PendingPlanID = ""
-		ackCallback(bot, cq, "Текущая подписка ещё активна — отправил сертификат.")
-		return
-	}
+	_ = pfsenseClient
 
 	if err := startPaymentForPlan(bot, chatID, session, plan); err != nil {
 		log.Printf("startPaymentForPlan error: %v", err)
-		_ = updateSessionText(bot, chatID, session, stateGetVPN, "Не удалось подготовить платёж. Попробуйте позже.", "", singleBackKeyboard("nav_menu"))
-		ackCallback(bot, cq, "Не удалось подготовить оплату")
+		_ = updateSessionText(bot, chatID, session, stateTopUp, "Не удалось сформировать счет. Попробуйте позже.", "", singleBackKeyboard("nav_menu"))
+		ackCallback(bot, cq, "Не удалось сформировать счет")
 		return
 	}
 
-	ackCallback(bot, cq, fmt.Sprintf("Тариф «%s» выбран", plan.Title))
+	ackCallback(bot, cq, fmt.Sprintf("Счет на <%s> готов", plan.Title))
 }
 
 func startPaymentForPlan(bot *tgbotapi.BotAPI, chatID int64, session *UserSession, plan RatePlan) error {
@@ -996,7 +1082,7 @@ func startPaymentForPlan(bot *tgbotapi.BotAPI, chatID int64, session *UserSessio
 	}
 
 	session.MessageID = newID
-	session.State = stateGetVPN
+	session.State = stateTopUp
 	session.ContentType = "text"
 	session.PendingPlanID = metadataPlanID
 
@@ -1053,10 +1139,6 @@ func handleCheckPayment(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, sessio
 	fake := &tgbotapi.Message{Chat: cq.Message.Chat, From: cq.From}
 
 	if err := handleSuccessfulPayment(bot, fake, pfsenseClient, plan, session); err != nil {
-		if errors.Is(err, errSubscriptionActive) {
-			ackCallback(bot, cq, "Подписка еще активна — сертификат отправлен повторно.")
-			return
-		}
 		log.Printf("handleSuccessfulPayment error: %v", err)
 		ackCallback(bot, cq, "Не удалось выдать сертификат. Свяжитесь с поддержкой.")
 		return
@@ -1080,22 +1162,19 @@ func handleSuccessfulPayment(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, pfsens
 	userID := int64(msg.From.ID)
 	telegramUser := fmt.Sprint(userID)
 
-	waitingText := fmt.Sprintf("⏳ Оформляем подписку «%s». Подождите пару секунд...", plan.Title)
-	if err := updateSessionText(bot, chatID, session, stateGetVPN, waitingText, "HTML", singleBackKeyboard("nav_menu")); err != nil {
+	waitingText := fmt.Sprintf("Готовим пополнение «%s». Пожалуйста, подождите...", plan.Title)
+	if err := updateSessionText(bot, chatID, session, stateTopUp, waitingText, "HTML", singleBackKeyboard("nav_menu")); err != nil {
 		log.Printf("updateSessionText error: %v", err)
 	}
 
 	err := issuePlanCertificate(bot, chatID, session, plan, pfsenseClient, telegramUser, userID)
-	if errors.Is(err, errSubscriptionActive) {
-		return errSubscriptionActive
-	}
 	if err != nil {
 		return err
 	}
 
 	session.PendingPlanID = ""
 
-	sendMessageToAdmin(fmt.Sprintf("Пользователь id:%d получил сертификат по тарифу «%s»", msg.From.ID, plan.Title), msg.From.UserName, bot, userID)
+	sendMessageToAdmin(fmt.Sprintf("Пользователь id:%d пополнил баланс пакетом «%s»", msg.From.ID, plan.Title), msg.From.UserName, bot, userID)
 	return nil
 }
 
@@ -1107,11 +1186,7 @@ func sendCertificate(certRefID, telegramUserID, certDateUntil string, isProb boo
 		}
 		certName = fmt.Sprintf("TrialCert%s_%ddays", telegramUserID, days)
 	} else {
-		if days > 0 {
-			certName = fmt.Sprintf("Cert%s_%ddays", telegramUserID, days)
-		} else {
-			certName = fmt.Sprintf("Cert%s", telegramUserID)
-		}
+		certName = fmt.Sprintf("Cert%s_permanent", telegramUserID)
 	}
 
 	ovpnData, err := pfsenseClient.GenerateOVPN(certRefID, "", "213.21.200.205")
@@ -1124,12 +1199,15 @@ func sendCertificate(certRefID, telegramUserID, certDateUntil string, isProb boo
 		Bytes: ovpnData,
 	}
 
-	caption := fmt.Sprintf("🐾 ID пользователя: <code>%d</code>\n📅 Сертификат активен до: %s", userID, certDateUntil)
-	if days > 0 {
-		if isProb {
-			caption += fmt.Sprintf("\n🗓️ Срок действия: %d дней", days)
-		} else {
-			caption += fmt.Sprintf("\n🗓️ Тариф: %d дней", days)
+	caption := fmt.Sprintf("VPN ID пользователя: <code>%d</code>\nДоступен до: %s", userID, certDateUntil)
+	if isProb {
+		caption += fmt.Sprintf("\nПробный доступ: %d дней", days)
+	} else {
+		if days > 0 {
+			caption += fmt.Sprintf("\nПополнение: +%d дней", days)
+		}
+		if balance, err := sqliteClient.GetDays(telegramUserID); err == nil {
+			caption += fmt.Sprintf("\nБаланс: %d дней", balance)
 		}
 	}
 
@@ -1138,44 +1216,40 @@ func sendCertificate(certRefID, telegramUserID, certDateUntil string, isProb boo
 
 func buildStatusText(pfsenseClient *pfsense.PfSenseClient, userID int) (string, error) {
 	telegramUser := fmt.Sprint(userID)
-	_, certRefID, err := pfsenseClient.GetAttachedCertRefIDByUserName(telegramUser)
+	_, _, err := pfsenseClient.GetAttachedCertRefIDByUserName(telegramUser)
 	days, _ := sqliteClient.GetDays(strconv.Itoa(userID))
 
 	if err != nil {
 		return fmt.Sprintf(`<b>Статус подписки:</b>
-<b>└ 🔴 Неактивна:</b> оформите тариф, чтобы получить новый сертификат.
-	Доступно дней : %d`, days), nil
+<b>├ 🔴 Неактивна:</b>
+<b>└ ⏳ Дней на балансе:</b> %d
+Пополните баланс, чтобы пользоваться VPN.`, days), nil
 	}
 
-	certID, certName, err := pfsenseClient.GetCertificateIDByRefid(certRefID)
-	if err != nil {
-		return "", err
-	}
+	// certID, certName, err := pfsenseClient.GetCertificateIDByRefid(certRefID)
+	// if err != nil {
+	// 	return "", err
+	// }
 
-	_, until, daysLeft, expired, err := pfsenseClient.GetDateOfCertificate(certID)
-	if err != nil {
-		return "", err
-	}
+	// _, until, daysLeft, expired, err := pfsenseClient.GetDateOfCertificate(certID)
+	// if err != nil {
+	// 	return "", err
+	// }
 
-	planDays := extractDaysFromCertName(certName)
+	// planDays := extractDaysFromCertName(certName)
 
-	if expired {
+	if days == 0 {
 		return fmt.Sprintf(`<b>Статус подписки:</b>
-<b>🔴 Истекла:</b> %s
-Выберите новый тариф, чтобы продлить доступ.`, until), nil
-	}
-
-	extraLine := ""
-	if planDays > 0 {
-		extraLine = fmt.Sprintf("\n<b>🗓️ Тариф:</b> %d дней", planDays)
+<b>├ 🔴 Неактивна</b>
+<b>└ ⏳ Дней на балансе:</b> %d
+Пополните баланс, чтобы пользоваться VPN.`, days), nil
 	}
 
 	return fmt.Sprintf(`<b>Статус подписки:</b>
-<b>🟢 Активна до:</b> %s
-<b>⏳ Осталось дней:</b> %d%s
-<b>⏳ Дней на балансе:</b> %d
+<b>├ 🟢 Активна</b>
+<b>└ ⏳ Дней на балансе:</b> %d
 ────────────────────────
-✅ Отличная новость — VPN работает!`, until, daysLeft, extraLine, days), nil
+✅ Отличная новость — VPN работает!`, days), nil
 }
 
 func sendMessageToAdmin(text string, username string, bot *tgbotapi.BotAPI, id int64) {
