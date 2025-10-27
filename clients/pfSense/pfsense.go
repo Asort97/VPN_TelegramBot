@@ -917,6 +917,10 @@ func (c *PfSenseClient) UnrevokeCertificate(certRef string) error {
 
 	certID, err := c.GetCertIdInRevocationList(certRef)
 	if err != nil {
+		if strings.Contains(err.Error(), "Couldnt find certificate") {
+			colorfulprint.PrintState(fmt.Sprintf("Certificate %s already active, skip unrevoke", certRef))
+			return nil
+		}
 		return colorfulprint.PrintError("Couldnt unrevoke certificate: %w", err)
 	}
 
