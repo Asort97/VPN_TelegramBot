@@ -15,9 +15,14 @@ type Store struct {
 }
 
 type UserData struct {
-	Days       int64  `json:"days"`
-	CertRef    string `json:"certref"`
-	LastDeduct string `json:"last_deduct"` // ISO8601 timestamp
+	Days           int64  `json:"days"`
+	CertRef        string `json:"certref"`
+	LastDeduct     string `json:"last_deduct"`     // ISO8601 timestamp
+	ReferredBy     string `json:"referred_by"`     // ID пользователя, который пригласил
+	ReferralUsed   bool   `json:"referral_used"`   // использовал ли свой реферальный бонус
+	ReferralsCount int    `json:"referrals_count"` // сколько человек пригласил
+	Email          string `json:"email"`
+	ConsentAt      string `json:"consent_at"` // ISO8601 timestamp, когда принял политику
 }
 
 var (
@@ -197,4 +202,100 @@ func (s *Store) SetCertRef(userID, certRef string) error {
 	ud.CertRef = certRef
 	db[userID] = ud
 	return s.saveUsersLocked()
+}
+
+// SetEmail сохраняет email пользователя
+func (s *Store) SetEmail(userID, email string) error {
+	dbMu.Lock()
+	defer dbMu.Unlock()
+
+	s.loadUsersLocked()
+
+	ud := db[userID]
+	if ud.LastDeduct == "" {
+		ud.LastDeduct = time.Now().UTC().Format(time.RFC3339)
+	}
+	ud.Email = email
+	db[userID] = ud
+	return s.saveUsersLocked()
+}
+
+// GetEmail возвращает email пользователя, если задан
+func (s *Store) GetEmail(userID string) (string, error) {
+	dbMu.Lock()
+	defer dbMu.Unlock()
+
+	s.loadUsersLocked()
+
+	ud, ok := db[userID]
+	if !ok {
+		return "", fmt.Errorf("user %s not found", userID)
+	}
+	return ud.Email, nil
+}
+
+// AcceptPrivacy помечает, что пользователь принял политику конфиденциальности
+func (s *Store) AcceptPrivacy(userID string, at time.Time) error {
+	dbMu.Lock()
+	defer dbMu.Unlock()
+
+	s.loadUsersLocked()
+
+	ud := db[userID]
+	if ud.LastDeduct == "" {
+		ud.LastDeduct = time.Now().UTC().Format(time.RFC3339)
+	}
+	ud.ConsentAt = at.UTC().Format(time.RFC3339)
+	db[userID] = ud
+	return s.saveUsersLocked()
+}
+
+// IsNewUser проверяет, существует ли пользователь в базе данных
+func (s *Store) IsNewUser(userID string) bool {
+	dbMu.Lock()
+	defer dbMu.Unlock()
+
+	s.loadUsersLocked()
+
+	_, exists := db[userID]
+	return !exists
+}
+
+// RecordReferral записывает реферальную связь между новым пользователем и пригласившим
+func (s *Store) RecordReferral(newUserID, referrerID string) error {
+	dbMu.Lock()
+	defer dbMu.Unlock()
+
+	s.loadUsersLocked()
+
+	// Проверяем, не использовал ли уже новый пользователь реферальный код
+	if newUser, exists := db[newUserID]; exists && newUser.ReferredBy != "" {
+		return fmt.Errorf("user %s already used referral code", newUserID)
+	}
+
+	// Обновляем нового пользователя
+	newUser := db[newUserID]
+	newUser.ReferredBy = referrerID
+	newUser.ReferralUsed = true
+	db[newUserID] = newUser
+
+	// Увеличиваем счетчик рефералов у пригласившего
+	referrer := db[referrerID]
+	referrer.ReferralsCount++
+	db[referrerID] = referrer
+
+	return s.saveUsersLocked()
+}
+
+// GetReferralsCount возвращает количество приглашенных пользователей
+func (s *Store) GetReferralsCount(userID string) int {
+	dbMu.Lock()
+	defer dbMu.Unlock()
+
+	s.loadUsersLocked()
+
+	if userData, exist := db[userID]; exist {
+		return userData.ReferralsCount
+	}
+	return 0
 }
