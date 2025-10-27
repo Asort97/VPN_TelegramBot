@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io/ioutil"
 	"net/http"
+	"sync"
 	"time"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
@@ -48,7 +49,11 @@ type ReceiptItem struct {
 	PaymentSubject string `json:"payment_subject"`
 }
 
-var userPayments = make(map[int64]string)
+var (
+	userPayments      = make(map[int64][]string) // хранит историю платежей пользователя (последние N)
+	processedPayments = make(map[string]bool)    // ID уже обработанных платежей (idempotency)
+	payMu             sync.Mutex
+)
 
 type YooKassaPaymentResponse struct {
 	ID           string                 `json:"id"`
@@ -202,7 +207,14 @@ func (y *YooKassaClient) sendYooKassaPaymentButton(bot *tgbotapi.BotAPI, chatID 
 		return messageID, false, fmt.Errorf("не удалось создать платёж: %v", err)
 	}
 
-	userPayments[chatID] = payment.ID
+	// записываем ID платежа в историю пользователя
+	payMu.Lock()
+	userPayments[chatID] = append(userPayments[chatID], payment.ID)
+	// ограничим историю до 5 последних записей, чтобы не разрасталась
+	if len(userPayments[chatID]) > 5 {
+		userPayments[chatID] = userPayments[chatID][len(userPayments[chatID])-5:]
+	}
+	payMu.Unlock()
 
 	confirmationURL := ""
 	if confirmation, ok := payment.Confirmation["confirmation_url"].(string); ok {
@@ -255,11 +267,41 @@ func (y *YooKassaClient) SendVPNPayment(bot *tgbotapi.BotAPI, chatID int64, mess
 	return y.sendYooKassaPaymentButton(bot, chatID, messageID, amount, productName, metadata, userEmail)
 }
 
-func (y *YooKassaClient) IsPaymentExist(chatID int64) (string, bool) {
-	paymentID, exists := userPayments[chatID]
-	return paymentID, exists
+// FindSucceededPayment ищет любой успешный платёж среди последних платежей пользователя.
+// Возвращает платёж и true, если найден успешно оплаченный и ещё не обработанный.
+func (y *YooKassaClient) FindSucceededPayment(chatID int64) (*YooKassaPaymentResponse, bool, error) {
+	payMu.Lock()
+	ids := append([]string(nil), userPayments[chatID]...) // копия
+	payMu.Unlock()
+
+	// обходим от самого нового к старому
+	for i := len(ids) - 1; i >= 0; i-- {
+		id := ids[i]
+		payMu.Lock()
+		already := processedPayments[id]
+		payMu.Unlock()
+		if already {
+			continue
+		}
+
+		payment, err := y.GetYooKassaPaymentStatus(id)
+		if err != nil {
+			// пропускаем сбойные
+			continue
+		}
+		if payment.Status == "succeeded" || payment.Paid {
+			payMu.Lock()
+			processedPayments[id] = true
+			payMu.Unlock()
+			return payment, true, nil
+		}
+	}
+	return nil, false, nil
 }
 
-func (y *YooKassaClient) DeletePayment(chatID int64) {
+// ClearPayments очищает историю платежей пользователя
+func (y *YooKassaClient) ClearPayments(chatID int64) {
+	payMu.Lock()
 	delete(userPayments, chatID)
+	payMu.Unlock()
 }
