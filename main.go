@@ -658,17 +658,18 @@ func rateSelectionKeyboard() tgbotapi.InlineKeyboardMarkup {
 
 func showRateSelection(bot *tgbotapi.BotAPI, chatID int64, session *UserSession, intro string) error {
 	session.PendingPlanID = ""
+	// Всегда показываем сопоставление: "цена -> дни" в заголовке.
+	var lines []string
+	for _, p := range ratePlans {
+		// Компактный формат: "25₽ → 15 д." — экономит место и читабельнее
+		lines = append(lines, fmt.Sprintf("%.0f₽ → %d д.", p.Amount, p.Days))
+	}
 
-	// Построим заголовок: если пришёл intro — используем его, иначе покажем сопоставление цена->дни
 	var header string
 	if strings.TrimSpace(intro) != "" {
-		header = intro + "\n\n💰 <b>Выберите тариф:</b>\n\n"
+		// Если есть intro (например, баланс), показываем его перед списком соответствия
+		header = intro + "\n\n💰 <b>Выберите тариф:</b>\n\n" + strings.Join(lines, "\n") + "\n\n"
 	} else {
-		// Составим список типа: "50 ₽ = 30 дней"
-		var lines []string
-		for _, p := range ratePlans {
-			lines = append(lines, fmt.Sprintf("%.0f ₽ = %d дней", p.Amount, p.Days))
-		}
 		header = "💰 <b>Выберите тариф:</b>\n\n" + strings.Join(lines, "\n") + "\n\n"
 	}
 
