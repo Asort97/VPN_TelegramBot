@@ -594,7 +594,7 @@ func mainMenuInlineKeyboard() tgbotapi.InlineKeyboardMarkup {
 			tgbotapi.NewInlineKeyboardButtonData("💰 Пополнить баланс", "nav_topup"),
 		),
 		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("� Профиль", "nav_status"),
+			tgbotapi.NewInlineKeyboardButtonData("👤 Профиль", "nav_status"),
 			tgbotapi.NewInlineKeyboardButtonData("🎁 Пригласить друга", "nav_referral"),
 		),
 		tgbotapi.NewInlineKeyboardRow(
