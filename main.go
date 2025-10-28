@@ -632,7 +632,8 @@ func rateSelectionKeyboard() tgbotapi.InlineKeyboardMarkup {
 	var currentRow []tgbotapi.InlineKeyboardButton
 
 	for _, plan := range ratePlans {
-		label := fmt.Sprintf("⏳ %s — %.0f ₽", plan.Title, plan.Amount)
+		// На кнопке оставляем только цену — описание сверху объясняет, чему соответствует цена
+		label := fmt.Sprintf("%.0f ₽", plan.Amount)
 		btn := tgbotapi.NewInlineKeyboardButtonData(label, "rate_"+plan.ID)
 		currentRow = append(currentRow, btn)
 
@@ -658,12 +659,20 @@ func rateSelectionKeyboard() tgbotapi.InlineKeyboardMarkup {
 func showRateSelection(bot *tgbotapi.BotAPI, chatID int64, session *UserSession, intro string) error {
 	session.PendingPlanID = ""
 
-	message := "💰 <b>Выберите тариф:</b>\n\n"
+	// Построим заголовок: если пришёл intro — используем его, иначе покажем сопоставление цена->дни
+	var header string
 	if strings.TrimSpace(intro) != "" {
-		message = intro + "\n\n💰 <b>Выберите тариф:</b>\n\n"
+		header = intro + "\n\n💰 <b>Выберите тариф:</b>\n\n"
+	} else {
+		// Составим список типа: "50 ₽ = 30 дней"
+		var lines []string
+		for _, p := range ratePlans {
+			lines = append(lines, fmt.Sprintf("%.0f ₽ = %d дней", p.Amount, p.Days))
+		}
+		header = "💰 <b>Выберите тариф:</b>\n\n" + strings.Join(lines, "\n") + "\n\n"
 	}
 
-	message += "⚡️ <i>Чем дольше период — тем выгоднее!</i>"
+	message := header + "⚡️ <i>Чем дольше период — тем выгоднее!</i>"
 
 	return updateSessionText(bot, chatID, session, stateChooseRate, message, "HTML", rateSelectionKeyboard())
 }
@@ -1261,7 +1270,7 @@ func handleReferralCallback(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, se
 
 💡 <b>Условия:</b>
 • Вы: <b>+15 дней</b> за каждого друга
-• Друг: <b>+30 дней</b> в подарок
+• Друг: <b>+7 дней</b> в подарок
 
 Поделитесь ссылкой и получайте дни!`, referralLink, referralsCount, referralsCount*15)
 
