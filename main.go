@@ -866,11 +866,11 @@ func handleStart(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, session *UserSessi
 
 	// Если новый пользователь
 	if isNew {
-		// Даем 30 дней новому пользователю
-		if err := sqliteClient.AddDays(userID, 30); err != nil {
+		// Даем 7 дней новому пользователю
+		if err := sqliteClient.AddDays(userID, 7); err != nil {
 			log.Printf("AddDays error for new user %s: %v", userID, err)
 		} else {
-			log.Printf("New user %s received 30 days welcome bonus", userID)
+			log.Printf("New user %s received 7 days welcome bonus", userID)
 		}
 
 		// Если пришел по реферальной ссылке
@@ -902,7 +902,7 @@ func handleStart(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, session *UserSessi
 			}
 
 			// Приветствие с упоминанием реферального бонуса
-			welcomeText := startText + "\n\n🎁 <b>Вы получили 30 дней в подарок за регистрацию по реферальной ссылке!</b>"
+			welcomeText := startText + "\n\n🎁 <b>Вы получили 7 дней в подарок за регистрацию по реферальной ссылке!</b>"
 			if err := updateSessionText(bot, chatID, session, stateMenu, welcomeText+"\n\n<b>Выберите нужный раздел ниже:</b>", "HTML", mainMenuInlineKeyboard()); err != nil {
 				log.Printf("updateSessionText error: %v", err)
 			}
@@ -910,7 +910,7 @@ func handleStart(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, session *UserSessi
 		}
 
 		// Обычное приветствие для нового пользователя без реферала
-		welcomeText := startText + "\n\n🎁 <b>Вам начислено 30 дней бесплатно!</b>"
+		welcomeText := startText + "\n\n🎁 <b>Вам начислено 7 дней бесплатно!</b>"
 		if err := updateSessionText(bot, chatID, session, stateMenu, welcomeText+"\n\n<b>Выберите нужный раздел ниже:</b>", "HTML", mainMenuInlineKeyboard()); err != nil {
 			log.Printf("updateSessionText error: %v", err)
 		}
@@ -943,7 +943,7 @@ func handleReferralStats(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 
 💡 <b>Как это работает?</b>
 • Вы получаете <b>15 дней</b> за каждого приглашенного
-• Ваш друг получает <b>30 дней</b> в подарок
+• Ваш друг получает <b>7 дней</b> в подарок
 
 Поделитесь ссылкой с друзьями!`, referralLink, referralsCount, referralsCount*15)
 
@@ -1117,10 +1117,10 @@ func handleGetVPN(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, session *Use
 
 	// Проверяем, новый ли пользователь, и даём бонус
 	if sqliteClient.IsNewUser(telegramUser) {
-		if err := sqliteClient.AddDays(telegramUser, 30); err != nil {
+		if err := sqliteClient.AddDays(telegramUser, 7); err != nil {
 			log.Printf("AddDays error for new user %s: %v", telegramUser, err)
 		} else {
-			log.Printf("New user %s received 30 days welcome bonus via GetVPN", telegramUser)
+			log.Printf("New user %s received 7 days welcome bonus via GetVPN", telegramUser)
 		}
 	}
 
