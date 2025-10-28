@@ -594,7 +594,7 @@ func mainMenuInlineKeyboard() tgbotapi.InlineKeyboardMarkup {
 			tgbotapi.NewInlineKeyboardButtonData("💰 Пополнить баланс", "nav_topup"),
 		),
 		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("📊 Статус", "nav_status"),
+			tgbotapi.NewInlineKeyboardButtonData("� Профиль", "nav_status"),
 			tgbotapi.NewInlineKeyboardButtonData("🎁 Пригласить друга", "nav_referral"),
 		),
 		tgbotapi.NewInlineKeyboardRow(
@@ -661,8 +661,8 @@ func showRateSelection(bot *tgbotapi.BotAPI, chatID int64, session *UserSession,
 	// Всегда показываем сопоставление: "цена -> дни" в заголовке.
 	var lines []string
 	for _, p := range ratePlans {
-		// Компактный формат: "25₽ → 15 д." — экономит место и читабельнее
-		lines = append(lines, fmt.Sprintf("%.0f₽ → %d д.", p.Amount, p.Days))
+		// Ещё более компактный формат: "25₽→15д." (без пробелов)
+		lines = append(lines, fmt.Sprintf("%.0f₽→%dд.", p.Amount, p.Days))
 	}
 
 	var header string
