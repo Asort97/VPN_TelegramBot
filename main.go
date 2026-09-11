@@ -100,8 +100,8 @@ var lastActionKey = make(map[int64]map[string]time.Time)
 var accessCache sync.Map // map[string]*accessInfo
 
 const (
-	mergedSubscriptionFreshTTL     = 15 * time.Second
-	mergedSubscriptionStaleTTL     = 30 * time.Minute
+	mergedSubscriptionFreshTTL     = 10 * time.Second
+	mergedSubscriptionStaleTTL     = 0 * time.Second
 	mergedSubscriptionBuildTimeout = 20 * time.Second
 )
 
@@ -5272,11 +5272,7 @@ func mergedSubscriptionUserActive(userID string) bool {
 }
 
 func mergedSubscriptionEntryFresh(entry mergedSubscriptionCacheEntry, now time.Time) bool {
-	ttl := mergedSubscriptionFreshTTL
-	if !strings.HasPrefix(entry.mergedStatus, "merged:") {
-		ttl = 15 * time.Second
-	}
-	return !entry.cachedAt.IsZero() && now.Sub(entry.cachedAt) <= ttl
+	return !entry.cachedAt.IsZero() && now.Sub(entry.cachedAt) <= mergedSubscriptionFreshTTL
 }
 
 func writeMergedSubscriptionEntry(w http.ResponseWriter, entry mergedSubscriptionCacheEntry, cacheStatus string) {
@@ -5414,7 +5410,7 @@ func handleMergedSubscription(w http.ResponseWriter, r *http.Request) {
 			writeMergedSubscriptionEntry(w, cached, "hit")
 			return
 		}
-		if strings.HasPrefix(cached.mergedStatus, "merged:") && now.Sub(cached.cachedAt) <= mergedSubscriptionStaleTTL {
+		if mergedSubscriptionStaleTTL > 0 && strings.HasPrefix(cached.mergedStatus, "merged:") && now.Sub(cached.cachedAt) <= mergedSubscriptionStaleTTL {
 			writeMergedSubscriptionEntry(w, cached, "stale")
 			refreshMergedSubscriptionAsync(cacheKey, targetUserID, variant)
 			return

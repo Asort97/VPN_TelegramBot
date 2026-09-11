@@ -180,14 +180,20 @@ func TestMergedSubscriptionCacheClonesMutableData(t *testing.T) {
 	}
 }
 
-func TestMergedSubscriptionEntryFreshUsesShortTTLForPrimaryOnly(t *testing.T) {
+func TestMergedSubscriptionEntryFreshUsesTenSecondTTL(t *testing.T) {
 	now := time.Now()
-	merged := mergedSubscriptionCacheEntry{mergedStatus: "merged:2", cachedAt: now.Add(-14 * time.Second)}
-	if !mergedSubscriptionEntryFresh(merged, now) {
-		t.Fatal("merged entry should still be fresh")
+	for _, status := range []string{"merged:2", "primary_only"} {
+		for _, age := range []time.Duration{9 * time.Second, 10 * time.Second, 11 * time.Second, time.Minute} {
+			entry := mergedSubscriptionCacheEntry{mergedStatus: status, cachedAt: now.Add(-age)}
+			if got, want := mergedSubscriptionEntryFresh(entry, now), age <= 10*time.Second; got != want {
+				t.Errorf("status=%s age=%s: fresh=%v, want %v", status, age, got, want)
+			}
+		}
 	}
-	primaryOnly := mergedSubscriptionCacheEntry{mergedStatus: "primary_only", cachedAt: now.Add(-time.Minute)}
-	if mergedSubscriptionEntryFresh(primaryOnly, now) {
-		t.Fatal("primary-only entry should use the short retry TTL")
+	if mergedSubscriptionEntryFresh(mergedSubscriptionCacheEntry{}, now) {
+		t.Fatal("entry without a timestamp must not be fresh")
+	}
+	if mergedSubscriptionStaleTTL != 0 {
+		t.Fatal("serving stale subscriptions must be disabled")
 	}
 }
